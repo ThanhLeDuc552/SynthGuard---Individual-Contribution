@@ -1,0 +1,12 @@
+We are a group of 6 people belong to 4 different majors (Data Science, Cybersecurity, Software Engineer, AI Engineer).
+
+Our current project is SynthGuard: A synthetic-data augmentation platform for rare-attack IDS training whose privacy treatment is risk-differentiated rather than uniform. Instead of a single privacy audit at the end, every generated record is scored with a per-record membershipinference (MIA) confidence against the generator’s own training set; the synthetic corpus is then partitioned by that score — high-risk records are regenerated or filtered out, low-risk records are released. The resulting fidelity–utility–privacy frontier is compared against uniform baselines (uniform noise, uniform subsampling, uniform differential-privacy budget) at matched release sizes, making the field’s implicit assumption “synthetic = private” the actual object of study rather than a side note. A fixed holdout protocol ensures the generator and any shadow models never see the MIA evaluation split, without which privacy-leakage numbers would be uninterpretable. CTGAN/TVAE generation, the downstream real-vs-augmented IDS comparison, and the fidelity–utility–privacy scorecard tool remain the delivery vehicle.
+
+Based on the assignments, we have pre-planned 4 sprints in Trello, with the first 2 sprints mainly for researching, and the last 2 for drafting the product diagram, its components, how it works, ... in detail (with minor implementation, mostly using Figma for 1st illustration of the final product).
+
+There are currently 4 labels correspond to 4 majors, and most tasks in Trello are placeholders (or some trash tasks).
+
+Regenerate all tasks (except for Data Science labeled tasks and tasks sitting in the "Task groups" section) that covers all majors and place them in plausible sprints. Remember to assign corresponding labels.
+
+Extra resources:
+- Trello: https://trello.com/b/LXLE8i7g/synthguard-cos40005-project-a

@@ -1,0 +1,48 @@
+{
+    "model_category": "MIA",
+    "model_name": "random_forest",
+    "timestamp": "2026-09-30_19-53-53",
+    "training_samples": 175217,
+    "input_features": [
+        "class_prob",
+        "predicted_class",
+        "is_attack"
+    ],
+    "encoded_features": [
+        "class_prob",
+        "is_attack",
+        "predicted_class_Analysis",
+        "predicted_class_Backdoor",
+        "predicted_class_Benign",
+        "predicted_class_DoS",
+        "predicted_class_Exploits",
+        "predicted_class_Fuzzers",
+        "predicted_class_Generic",
+        "predicted_class_Reconnaissance",
+        "predicted_class_Shellcode",
+        "predicted_class_Worms"
+    ],
+    "target_column": "is_member",
+    "dataset_source": "datasets/UNSW-NB15_MIA/train.csv",
+    "hyperparameters": {
+        "n_estimators": 100,
+        "max_depth": 12,
+        "class_weight": "balanced",
+        "random_state": 42
+    },
+    "training_time_seconds": 2.01,
+    "feature_importances": {
+        "class_prob": 0.9580698986067383,
+        "predicted_class_DoS": 0.005761880170724832,
+        "predicted_class_Fuzzers": 0.005383929815836196,
+        "predicted_class_Backdoor": 0.0051366194431874184,
+        "predicted_class_Analysis": 0.004421806270209564,
+        "predicted_class_Reconnaissance": 0.004314838357303461,
+        "predicted_class_Generic": 0.004121080226047516,
+        "predicted_class_Exploits": 0.004049662296968164,
+        "predicted_class_Shellcode": 0.0025670383662441234,
+        "is_attack": 0.00216165502522647,
+        "predicted_class_Benign": 0.0020153135407472906,
+        "predicted_class_Worms": 0.001996277880766557
+    }
+}

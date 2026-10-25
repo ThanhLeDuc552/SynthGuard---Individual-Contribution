@@ -1,0 +1,3 @@
+models:
+- CTGAN/TVAE: main generator models
+- MIA: attacker model
