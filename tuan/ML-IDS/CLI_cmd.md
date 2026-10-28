@@ -1,4 +1,3 @@
-````markdown
 ## Run
 
 ```bash
@@ -43,4 +42,3 @@ python ml_ids_detect.py --real data/real.csv --synthetic synthetic/CTGAN synthet
 Output in `<OUTPUT_FOLDER>`: `summary.csv`, `per_class_f1_TSTR.csv`, `per_class_f1_TRS.csv`, `report.html` (open in a browser).
 
 Requirements: `pip install numpy pandas scipy scikit-learn xgboost`
-````
