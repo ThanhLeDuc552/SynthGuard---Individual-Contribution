@@ -1,5 +1,3 @@
-Phần dưới viết cho đồng đội sẽ tự chạy script, chưa quen với code. Bạn có thể dán nguyên vào README:
-
 ````markdown
 ## Run
 
