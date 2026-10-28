@@ -1,0 +1,8 @@
+# dataset và kết quả nặng: không đưa lên Git
+dataset/*/*.csv
+dataset/*/*.zip
+outputs/*
+!outputs/.gitkeep
+.venv/
+__pycache__/
+.ipynb_checkpoints/
