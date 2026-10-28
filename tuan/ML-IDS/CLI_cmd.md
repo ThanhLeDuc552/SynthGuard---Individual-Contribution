@@ -44,7 +44,3 @@ Output in `<OUTPUT_FOLDER>`: `summary.csv`, `per_class_f1_TSTR.csv`, `per_class_
 
 Requirements: `pip install numpy pandas scipy scikit-learn xgboost`
 ````
-
-**Hai điều bạn nên kiểm tra trước khi push:**
-- **Nhãn của thư mục chứa file synthetic:** report lấy tên thư mục làm tên generator (`CTGAN`, `TVAE`...). Vì vậy người khác nên đặt mỗi generator trong một thư mục riêng.
-- **Data thật có cần push không:** nếu không push file data thật lên repo, nên ghi rõ trong README nơi người khác lấy file đó.
