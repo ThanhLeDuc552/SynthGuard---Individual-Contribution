@@ -1,0 +1,1 @@
+python ml_ids_detect.py --real UNSW-NB15_oversampled/UNSW-NB15_oversampled/unsw_nb15_attacks_original.csv --synthetic "Synthetic Data (for test)/CTGAN" "Synthetic Data (for test)/TVAE" UNSW-NB15_oversampled/UNSW-NB15_oversampled --out-dir synthetic_report --gpu

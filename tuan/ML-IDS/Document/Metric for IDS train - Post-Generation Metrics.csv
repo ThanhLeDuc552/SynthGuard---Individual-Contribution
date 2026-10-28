@@ -1,0 +1,41 @@
+"Post-Generation Evaluation Metrics: Models, Synthetic Data & IDS",,,,,
+"Metrics for evaluating trained generative models, generated tabular/network synthetic data, and downstream IDS classifiers.",,,,,
+,,,,,
+Metric Category,Metric Name,Mathematical Basis / Formulation,Target Evaluated Object,Operational Purpose & Value,Target / Benchmark Direction
+GENERATIVE MODEL DISTRIBUTION METRICS,,,,,
+Generative Model Distribution Metrics,Fréchet Inception Distance (FID),||mu_r - mu_g||^2 + Tr(Sigma_r + Sigma_g - 2*(Sigma_r*Sigma_g)^0.5),Generated vs Real Feature Embeddings,Measures Wasserstein distance between real and synthetic Gaussian embedding distributions.,Low (-> 0)
+Generative Model Distribution Metrics,Maximum Mean Discrepancy (MMD),"E[k(x,x')] - 2E[k(x,y)] + E[k(y,y')]",Feature Representation Vectors,Evaluates distance between probability distributions in Reproducing Kernel Hilbert Space.,Low (-> 0)
+Generative Model Distribution Metrics,Precision for Generative Models,Pr(y_gen in Support_real),Synthetic Feature Vectors,Quantifies fidelity; percentage of generated samples that fall within real data manifold.,High (-> 1.0)
+Generative Model Distribution Metrics,Recall for Generative Models,Pr(x_real in Support_gen),Real Feature Vectors,Quantifies diversity/coverage; percentage of real samples covered by synthetic manifold.,High (-> 1.0)
+Generative Model Distribution Metrics,Jensen-Shannon Divergence (JSD),0.5*KL(P||M) + 0.5*KL(Q||M),Probability Density Vectors,Symmetric bounded measure of divergence between real and generated flow attribute distributions.,Low (-> 0)
+Generative Model Distribution Metrics,Wasserstein Distance (EMD),inf E[||X - Y||],Continuous Traffic Attribute Vectors,Optimal transport cost to transform synthetic distribution into real distribution.,Low (-> 0)
+,,,,,
+IDS CLASSIFIER PERFORMANCE METRICS,,,,,
+IDS Classifier Performance Metrics,Detection Rate (DR / TPR),TP / (TP + FN),Downstream Intrusion Detector,Percentage of actual malicious network attack flows correctly identified.,High (-> 1.0)
+IDS Classifier Performance Metrics,False Alarm Rate (FAR / FPR),FP / (FP + TN),Downstream Intrusion Detector,Rate of benign traffic falsely flagged as intrusions; controls SOC analyst workload.,Low (-> 0)
+IDS Classifier Performance Metrics,Precision-Recall AUC (PR-AUC),Area under Precision-Recall Curve,IDS Model under Class Imbalance,Primary evaluation metric for imbalanced attack classification (superior to ROC-AUC).,High (-> 1.0)
+IDS Classifier Performance Metrics,Matthews Correlation Coefficient (MCC),(TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN)),Binary/Multi-class IDS Detector,Balanced correlation coefficient robust against extreme class imbalance.,High (-> +1.0)
+,,,,,
+MIA PRIVACY AUDITOR METRICS,,,,,
+MIA Privacy Auditor Metrics,MIA Attack ROC-AUC,Area under Attacker ROC Curve,Shadow Model Privacy Auditor,Discriminative capability of adversary in determining training set membership.,Low (-> 0.5 Random)
+MIA Privacy Auditor Metrics,"TPR at Low FPR (e.g., TPR @ 0.1% FPR)",TPR evaluated at FPR = 0.001,High-Confidence Auditor,Measures high-confidence exact memorization without triggering false alarms.,Low (-> 0.0)
+MIA Privacy Auditor Metrics,MIA Advantage,TPR - FPR,Privacy Attacker Model,Quantifies attacker advantage over random guessing.,Low (-> 0.0)
+,,,,,
+"PER-PURPOSE SYNTHETIC DATA METRICS (FIDELITY, UTILITY, PRIVACY)",,,,,
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)",Kolmogorov-Smirnov (KS) Test,sup_x |F_real(x) - F_syn(x)|,Continuous Marginal Distributions,Evaluates marginal cumulative distribution alignment for flow descriptors.,Low KS / High p-val
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)",Correlation Difference Norm,||C_real - C_syn||_F,Bivariate Correlation Matrices,Verifies preservation of feature inter-dependencies across synthetic records.,Low (-> 0)
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)",Tail Fidelity / Extreme Value Index,Kurtosis / Skewness / Hill Estimator,Heavy-Tailed Burst Features,Assesses how accurately synthetic data preserves extreme network burst distributions.,Matched to Real
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)","Train on Synthetic, Test on Real (TSTR)",Classifier Metric (F1/PR-AUC) on Real Test,Synthetic-Trained IDS Model,Evaluates downstream ML utility when models are trained purely on generated traffic.,High (Matches TRTR)
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)",ML Efficacy Ratio,Performance_TSTR / Performance_TRTR,Relative Utility Benchmark,Ratio of synthetic-trained model utility to real-trained model utility.,High (-> 1.0)
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)",SHAP Rank Stability,Spearman rank corr of SHAP feature values,IDS Feature Attribution,Assesses whether synthetic-trained models rely on domain-correct features.,High (-> 1.0)
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)",Distance to Closest Record (DCR),min_j ||x_syn_i - x_train_j||_2,Synthetic vs Training Samples,Measures spatial proximity to detect exact copying or memorization of training flows.,DCR_train >= DCR_test
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)",Empirical MIA Risk (Synth-MIA),Max AUC across ensemble of shadow attacks,Tabular Privacy Audit,Evaluates empirical privacy leakage across calibrated shadow attack models.,Low Risk (< 0.6)
+"Per-Purpose Synthetic Data Metrics (Fidelity, Utility, Privacy)","Formal Differential Privacy (epsilon, delta)","(epsilon, delta)-DP via DP-SGD / PATE",Generative Model Training,Provides mathematical guarantee bounding maximum information leakage per record.,"Low epsilon (e.g., < 3.0)"
+,,,,,
+IDS DATA & NETWORK FLOW METRICS,,,,,
+IDS Data & Network Flow Metrics,Imbalance Ratio (IR),N_benign / N_attack,Traffic Dataset Class Counts,Quantifies class distribution skew between normal background and threat traffic.,Dataset Context
+IDS Data & Network Flow Metrics,Rare Attack Class Proportion,N_rare / N_total * 100%,Minority Threat Families,"Percentage representation of extreme minority intrusion categories (e.g., U2R, Shellcode).",Flag if < 0.1%
+IDS Data & Network Flow Metrics,Class Overlap / Separatrix Complexity,k-NN overlap / Fisher Discriminant,Feature Space Boundaries,Degree of feature entanglement between stealth attacks and normal traffic.,Lower Overlap Better
+IDS Data & Network Flow Metrics,L1 Within-Flow Variance Entropy,Gaussian Differential Entropy,Packet Size / Inter-Arrival Times,Measures packet size and timing complexity distinguishing automated floods from humans.,Matched Entropy
+IDS Data & Network Flow Metrics,L2 Directional Asymmetry JSD,JSD(P_fwd || P_bwd),Forward vs Backward Flow,Quantifies directional asymmetry (identifying unidirectional floods vs interactive sessions).,Matched JSD
+IDS Data & Network Flow Metrics,L3 Protocol-Flag Incidence Entropy,Shannon Entropy on TCP Flags,FIN/SYN/RST/ACK Control Flags,Evaluates flag manipulation and anomaly density across network flows.,Matched Entropy
