@@ -1,24 +1,14 @@
-dataset (for training the models): 1ST PRIORITY
-    - oversampling rare attack classes, determine which can be used for training and for stress-testing only
-    - undersampling benign samples (so that the overall distribution shape is preserved, keeping a reasonable benign/attack ratio)
-    - combine all datasets to 1 (assess their purpose and compatibility first)
-    - CURRENT:
-        - SMOTE variants currently outperform all models in terms of OS (but have not validate dataset validity -> need metrics)
-            - Both paper-proved and simple inference-proved
-        - NEXT STEP: 
-            - Test US models for balancing benign/attack: RUS, NearMiss, ...
-            - Test DL models 
-                - DL-based OS models: SMOTE variants (ADASYN, SMOTE-NC, Borderline-SMOTE, SMOTE-ENN, ...)
-                - DL models combination (BiLSTM, GAN + LSTM, ...)
-            - Determine which classes can be used for training and for stress-testing only for each dataset
-                - PRIORITY: FOCUS ON RARE ATTACK CLASSES TO ALIGN WITH THE PROJECT OBJECTIVE
+dataset (for training the models):
+    - CTGAN/TVAE: all train on the original attack classes (get rid of very minor classes)
+    - IDS, MIA:
+        - bot-iot: c-vae + RUS
+        - ton-iot: c-vae
+        - unsw: none
+        - cic-ids: none
+        - train 4 different pairs targeting different domain
+            - domains: school - cloud - smart home - hybrid cloud
+        - should use XGBoost
 
-metrics: 2ND PRIORITY
-    - per-model metrics (IDS, MIA, Generator)
-    - per-perpose metrics (fidelity-utility-privacy, ...)
-    - IDS data metrics 
+CVAE: 
+    - need to tune the model to output the best samples possible
     
-reports: 3RD PRIORITY
-    - Contrib report (individual)
-    - Project plan report (group)
-    - Deadline: 25/10 at 20:59

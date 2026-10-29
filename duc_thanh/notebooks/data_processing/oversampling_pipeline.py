@@ -7,6 +7,7 @@ minority attack classes within network flow datasets:
 2. CTGAN (Conditional Tabular Generative Adversarial Network)
 3. Tabular GAN (PyTorch Deep Tabular Generative Adversarial Network)
 4. SMOTIFIED-GAN (Hybrid SMOTE + GAN manifold-enrichment generation)
+5. CVAE (Conditional Variational Autoencoder with beta-VAE ELBO loss)
 """
 import torch
 import torch.nn as nn
@@ -584,7 +585,52 @@ class AttackOversamplingPipeline:
         return df_out
 
     # ------------------------------------------------------------------------
-    # Execute All 4 Generators
+    # 5. CVAE Oversampling (Conditional Variational Autoencoder)
+    # ------------------------------------------------------------------------
+    def apply_cvae(
+        self,
+        df_attacks: pd.DataFrame,
+        target_count: Union[str, int, Dict[str, int]] = "majority",
+        epochs: int = 30,
+        batch_size: int = 128,
+        latent_dim: int = 32,
+        beta: float = 0.5
+    ) -> pd.DataFrame:
+        """
+        Applies Conditional Variational Autoencoder (CVAE) to synthesize realistic
+        continuous feature vectors conditioned on minority attack labels.
+        """
+        t0 = time.time()
+        print("\n>>> Executing CVAE (Conditional Variational Autoencoder) Attack Oversampling...")
+        from cvae_oversampling import CVAEOversampler
+        feature_cols = self._resolve_features(df_attacks)
+        cvae_model = CVAEOversampler(
+            latent_dim=latent_dim,
+            beta=beta,
+            batch_size=batch_size,
+            epochs=epochs,
+            device=self.device,
+            random_state=self.random_state
+        )
+        df_out = cvae_model.resample(
+            df=df_attacks,
+            target_col=self.target_col,
+            target_count=target_count,
+            feature_cols=feature_cols,
+            verbose=False
+        )
+        elapsed = time.time() - t0
+        print(f"    CVAE Complete: {len(df_attacks):,} -> {len(df_out):,} samples ({elapsed:.2f}s)")
+        self.diagnostics["cvae"] = {
+            "elapsed_sec": round(elapsed, 2),
+            "original_count": len(df_attacks),
+            "oversampled_count": len(df_out),
+            "class_distribution": df_out[self.target_col].value_counts().to_dict()
+        }
+        return df_out
+
+    # ------------------------------------------------------------------------
+    # Execute All Generators
     # ------------------------------------------------------------------------
     def generate_all_oversampled_datasets(
         self,
