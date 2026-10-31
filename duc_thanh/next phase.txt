@@ -1,5 +1,10 @@
 dataset (for training the models):
-    - CTGAN/TVAE: all train on the original attack classes (get rid of very minor classes)
+    - TVAE:
+        - Train on the smote-10k dataset prevent mode collapse, improve syn data quality
+        - Keep the smote-10k as the final dataset for TVAE
+    - CTGAN:
+        - All is bad, but smote-10k still the best in those bad
+        - MUST process the generated dataset (mostly invalid rows)
     - IDS, MIA:
         - bot-iot: c-vae + RUS
         - ton-iot: c-vae

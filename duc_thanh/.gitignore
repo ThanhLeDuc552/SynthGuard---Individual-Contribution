@@ -14,3 +14,6 @@ venv/
 
 # IDE
 .vscode/
+
+# DuckDB tmp
+.tmp/
