@@ -36,6 +36,12 @@ from cvae_oversampling import CVAEOversampler
 # Setup directories
 base_dir = Path.cwd()
 possible_roots = [
+    current_dir.parents[2] / 'datasets/NetFlow',
+    current_dir.parents[3] / 'duc_thanh/datasets/NetFlow',
+    current_dir.parents[3] / 'datasets/NetFlow',
+    base_dir / '../../../datasets/NetFlow',
+    base_dir / '../../datasets/NetFlow',
+    base_dir / '../datasets/NetFlow',
     base_dir / 'duc_thanh/datasets/NetFlow',
     base_dir / 'datasets/NetFlow',
     Path('d:/Swinburne Courses/Project A/duc_thanh/datasets/NetFlow'),

@@ -602,6 +602,9 @@ class AttackOversamplingPipeline:
         """
         t0 = time.time()
         print("\n>>> Executing CVAE (Conditional Variational Autoencoder) Attack Oversampling...")
+        support_dir = Path(__file__).resolve().parent
+        if str(support_dir) not in sys.path:
+            sys.path.append(str(support_dir))
         from cvae_oversampling import CVAEOversampler
         feature_cols = self._resolve_features(df_attacks)
         cvae_model = CVAEOversampler(
