@@ -1,0 +1,8 @@
+torch==2.11.0
+sdv==2.0.0
+optuna==5.0.0
+numpy==2.5.4
+pandas==2.3.3
+scipy==1.18.1
+scikit-learn==1.9.1
+ipykernel==7.4.0
