@@ -1,0 +1,13 @@
+Data science:
+- oversample worms too much (89.3 oversampling rate)
+- OS small class too much could lead the model to memorize the real training point
+- using SMOTE on discrete values can interpolate them to impossible fractional values
+
+AI:
+- does not limit the number of gradient updates on models -> better ? geometric interpolation : optimizer
+
+Suggest fix:
+- smote -> smote-nc (can handle discrete value)
+- cap the maximum oversampling multiplier
+- log-transform heavy-tailed continuous features to aid generator
+- evaluation across random seeds, 

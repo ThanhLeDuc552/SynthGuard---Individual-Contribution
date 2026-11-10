@@ -1,0 +1,44 @@
+current nf_unsw_resample.py (comp1):
+- turn into a module (already did)
+- either include or create a separate class for tuning hyperparams (y_max)
+
+class for CTGAN & TVAE (comp2):
+- model
+- weight (store best weight)
+- train function
+    - gradient update number (FIXED)
+    - epochs
+    - ...(common params) (will be provided later by another member)
+- optuna tune function (include in the class or in a separate class)
+
+class for sample filtering (comp3):
+- reverse transformation
+    - reverse log-transform 
+    - rounding
+    - netflow rules
+- OOF & ENN check:
+    - OOF:
+        - setting: xgboost trained on 5-fold
+        - check whether a sample have high confidence score for its intended class and HIGHER THAN THE DEFINED THRESH
+        - trained on real dataset only (the trained subset)
+        - if not then remove, else keep
+    - ENN:
+        - check whether the sample is close to the wrong class
+        - close then remove, else keep
+        - set n to 3
+- tune function (for the thresh, can be a separate class or included)
+
+class for final ids model (comp4):
+- ids model
+- train function
+- evaluate function
+    - include appropriate metrics
+    - evaluate on the val set during training (the whole loop), test set when done
+
+pipeline:
+first round: tune comp1 only based on comp4 evaluation, if can't improve more (difference of epsilon) -> second round
+second round: tune comp2 only based on comp4 evaluation, if cant improve -> third round
+third round: tune comp3, the same as other components
+final round: tune comp4, if done then report results on ids performance, dataset distance to val set distribution, and such. 
+NOTE:
+- all round always run to the final component (comp4), since comp4 performance is what we want to tune

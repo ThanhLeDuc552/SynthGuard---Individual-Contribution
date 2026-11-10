@@ -1,0 +1,38 @@
+NF-UNSW-NB15-v3 Processing, Resampling, and Cross-Validation Pipeline.
+Steps:
+1. Pruning non-generalizable shortcut learning features (IPs, Ports, Timestamps)
+   and deduplicating the dataset across all remaining features.
+2. Stratified sampling (80/20) to extract a pristine Holdout test set (20%).
+   All downstream steps strictly use the remaining non-holdout dev/training set (80%).
+3. Split the 80% to train/val/test (70/10/20). All the below transformations will be done on the train-set only
+4. Disaggregating benign and attack flows for independent preprocessing.
+
+5. CALCULATE A SYNTHETIC DEFICIT FOR ATTACK CLASSES (RESEARCH PROBLEM 1)
+- define synthetic deficit: the number of synthetic samples needed for the class to not break the boundary while aid minor classes
+- n_syn = max(0, t_c - n_c)
+    - n_syn: number of synthetic samples required
+    - t_c: ideal number of samples after OS
+    - n_c: org number of samples
+- t_c = max(n_c, min(t_max, y_max * n_c))
+    - t_max: maximum number of samples
+    - y_max: multiplication param
+- current assumption: t_max = 10k, y_max = 25 (use this in the implementation until changed manually)
+- could use tree-based model to test performance of classes -> get ideal numbers (grid-search)
+
+6. Oversampling & process loop: (FOR ATTACK SAMPLES ONLY)
+- NORMALIZE SAMPLES FIRST
+- create a dict of t_c values for each class
+- pass to SMOTE-NC -> training data (NO FURTHER PROCESSING)
+
+7. HOW TO TRAIN GENERATORS: 
+- SET THE NUMBER OF GRADIENT UPDATES TO A FIXED NUMBER (42K IN THE PROPOSED METHOD)
+
+
+8. generated dataset from CTGAN and TVAE (post-processing data):
+- instruct the generator to draw up to 10 * n_syn (for after processing)
+- REVERSE TRANSFORMATION: REVERSE LOG-TRANSFORM, INTEGER ROUNDING, NON-NEGATIVITY, PHYSICAL PROTOCOL RULES
+- OOF confidence gate
+    - purpose: prob of the synthetic sample actually belongs to its intended class
+    - predictor: xgboost model trained on 5-fold cross-val STRICTLY ON real dataset 
+    - A HYPERPARAM TUNED ON THE VALIDATION SET
+- ENN against real samples (disagree -> remove)
