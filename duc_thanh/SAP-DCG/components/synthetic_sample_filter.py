@@ -60,10 +60,32 @@ class SyntheticSampleFilter:
         self.oof_models: List[xgb.XGBClassifier] = []
         self.label_encoder: Optional[LabelEncoder] = None
         self.real_feature_cols: List[str] = []
+        self.real_fill_values: Optional[pd.Series] = None
         self.enn_engine: Optional[NearestNeighbors] = None
         self.enn_scaler: Optional[StandardScaler] = None
         self.real_labels_enn: Optional[np.ndarray] = None
         self.valid_protocols: Optional[set] = None
+
+    @staticmethod
+    def _sanitize_features(
+        df: pd.DataFrame,
+        feature_cols: List[str],
+        fill_values: Optional[pd.Series] = None,
+    ) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Sanitizes feature matrix:
+          - Replaces inf and -inf with NaN
+          - Imputes NaNs using column median (or provided fill_values)
+          - Casts to float32 and clips to valid finite float32 bounds
+        """
+        clean_df = df[feature_cols].copy()
+        clean_df = clean_df.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+        if fill_values is None:
+            fill_values = clean_df.median().fillna(0.0)
+        clean_df = clean_df.fillna(fill_values).astype("float32")
+        f32_min, f32_max = np.finfo(np.float32).min, np.finfo(np.float32).max
+        clean_df = clean_df.clip(lower=f32_min, upper=f32_max)
+        return clean_df, fill_values
 
     # ------------------------------------------------------------------------
     # 1. Reverse Transformation & Physical NetFlow Protocol Rules
@@ -116,11 +138,13 @@ class SyntheticSampleFilter:
 
         # 5. NetFlow physical invariant protocol rules
         # Rule A: Zero packets cannot transmit positive bytes
-        zero_out = (df_out["OUT_PKTS"] == 0) & (df_out["OUT_BYTES"] > 0)
-        df_out.loc[zero_out, "OUT_BYTES"] = 0
+        if "OUT_PKTS" in df_out.columns and "OUT_BYTES" in df_out.columns:
+            zero_out = (df_out["OUT_PKTS"] == 0) & (df_out["OUT_BYTES"] > 0)
+            df_out.loc[zero_out, "OUT_BYTES"] = 0
 
-        zero_in = (df_out["IN_PKTS"] == 0) & (df_out["IN_BYTES"] > 0)
-        df_out.loc[zero_in, "IN_BYTES"] = 0
+        if "IN_PKTS" in df_out.columns and "IN_BYTES" in df_out.columns:
+            zero_in = (df_out["IN_PKTS"] == 0) & (df_out["IN_BYTES"] > 0)
+            df_out.loc[zero_in, "IN_BYTES"] = 0
 
         # Rule B: Non-TCP protocol flows cannot have non-zero TCP flags
         if "PROTOCOL" in df_out.columns:
@@ -168,11 +192,7 @@ class SyntheticSampleFilter:
         # Encode attack targets
         self.label_encoder = LabelEncoder()
         y_real = self.label_encoder.fit_transform(real_train_df["Attack"])
-        X_real = real_train_df[feature_cols].copy()
-
-        # Sanitize real features
-        for col in feature_cols:
-            X_real[col] = pd.to_numeric(X_real[col], errors="coerce").fillna(0.0)
+        X_real, self.real_fill_values = self._sanitize_features(real_train_df, feature_cols)
 
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
         self.oof_models = []
@@ -187,7 +207,7 @@ class SyntheticSampleFilter:
                 tree_method="hist",
                 random_state=self.random_state + fold,
                 verbosity=0,
-                n_jobs=4,
+                n_jobs=-1,
             )
             model.fit(X_tr, y_tr)
             self.oof_models.append(model)
@@ -202,9 +222,7 @@ class SyntheticSampleFilter:
         if not self.oof_models or self.label_encoder is None:
             raise RuntimeError("OOF predictor not fitted. Call fit_oof_predictor first.")
 
-        X_syn = synthetic_df[self.real_feature_cols].copy()
-        for col in self.real_feature_cols:
-            X_syn[col] = pd.to_numeric(X_syn[col], errors="coerce").fillna(0.0)
+        X_syn, _ = self._sanitize_features(synthetic_df, self.real_feature_cols, fill_values=self.real_fill_values)
 
         # Average probabilities across 5 folds
         all_probs = np.zeros((len(synthetic_df), len(self.label_encoder.classes_)))
@@ -235,14 +253,12 @@ class SyntheticSampleFilter:
         """
         print(f">>> [SampleFilter ENN] Fitting Edited Nearest Neighbors (k={self.enn_neighbors}) on Real Dataset...")
         feature_cols = [c for c in real_train_df.columns if c not in ["Label", "Attack"]]
-        X_real = real_train_df[feature_cols].copy()
-        for col in feature_cols:
-            X_real[col] = pd.to_numeric(X_real[col], errors="coerce").fillna(0.0)
+        X_real, _ = self._sanitize_features(real_train_df, feature_cols, fill_values=self.real_fill_values)
 
         self.enn_scaler = StandardScaler()
         X_scaled = self.enn_scaler.fit_transform(X_real)
 
-        self.enn_engine = NearestNeighbors(n_neighbors=self.enn_neighbors, algorithm="auto", n_jobs=4)
+        self.enn_engine = NearestNeighbors(n_neighbors=self.enn_neighbors, algorithm="auto", n_jobs=-1)
         self.enn_engine.fit(X_scaled)
         self.real_labels_enn = real_train_df["Attack"].values
         print(f"    ENN index ready on {len(X_scaled):,} real reference flows.\n")
@@ -255,9 +271,7 @@ class SyntheticSampleFilter:
         if self.enn_engine is None or self.enn_scaler is None:
             raise RuntimeError("ENN engine not fitted. Call fit_enn first.")
 
-        X_syn = synthetic_df[self.real_feature_cols].copy()
-        for col in self.real_feature_cols:
-            X_syn[col] = pd.to_numeric(X_syn[col], errors="coerce").fillna(0.0)
+        X_syn, _ = self._sanitize_features(synthetic_df, self.real_feature_cols, fill_values=self.real_fill_values)
 
         X_syn_scaled = self.enn_scaler.transform(X_syn)
         _, indices = self.enn_engine.kneighbors(X_syn_scaled)

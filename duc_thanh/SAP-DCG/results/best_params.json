@@ -1,0 +1,69 @@
+{
+  "pipeline_configuration": {
+    "t_max": 10000,
+    "generator_type": "ctgan",
+    "fixed_gradient_updates": 42000,
+    "epsilon": 0.002,
+    "target_metric": "macro_f1",
+    "random_state": 42
+  },
+  "round1_resampler_best_params": {
+    "best_y_max": 5,
+    "target_counts": {
+      "Exploits": 22673,
+      "Fuzzers": 15110,
+      "Reconnaissance": 10000,
+      "Generic": 10000,
+      "DoS": 10000,
+      "Backdoor": 10000,
+      "Shellcode": 4725,
+      "Analysis": 3435,
+      "Worms": 395
+    },
+    "syn_deficit": {
+      "Exploits": 0,
+      "Fuzzers": 0,
+      "Reconnaissance": 3327,
+      "Generic": 5739,
+      "DoS": 6990,
+      "Backdoor": 7826,
+      "Shellcode": 3780,
+      "Analysis": 2748,
+      "Worms": 316
+    },
+    "best_score": 0.568
+  },
+  "round2_generator_best_params": {
+    "generator_type": "ctgan",
+    "fixed_gradient_updates": 42000,
+    "weights_checkpoint": "/content/drive/MyDrive/SAP-DCG/round2_best_weights.pt",
+    "diagnostics": {
+      "unified": {
+        "samples": 86338,
+        "epochs": 98,
+        "batch_size": 200,
+        "elapsed_sec": 2786.76
+      }
+    },
+    "val_score": 0.568
+  },
+  "round3_sample_filter_best_params": {
+    "best_oof_threshold": 0.4,
+    "enn_neighbors": 3,
+    "kept_samples": 813,
+    "best_score": 0.5712
+  },
+  "final_round_ids_model_best_params": {
+    "n_estimators": 100,
+    "max_depth": 10,
+    "learning_rate": 0.052220677761467035,
+    "subsample": 1.0,
+    "colsample_bytree": 0.8,
+    "random_state": 42,
+    "n_jobs": 4,
+    "tree_method": "hist",
+    "weight_power": 0.75,
+    "min_confidence": 0.3,
+    "max_fpr": 0.01
+  }
+}

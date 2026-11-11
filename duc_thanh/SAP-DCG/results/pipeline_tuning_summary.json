@@ -1,0 +1,502 @@
+{
+  "configuration": {
+    "t_max": 10000,
+    "best_y_max": 5,
+    "generator_type": "ctgan",
+    "fixed_gradient_updates": 42000,
+    "epsilon": 0.002,
+    "target_metric": "macro_f1",
+    "output_dir": "/content/drive/MyDrive/SAP-DCG"
+  },
+  "best_parameters": {
+    "pipeline_configuration": {
+      "t_max": 10000,
+      "generator_type": "ctgan",
+      "fixed_gradient_updates": 42000,
+      "epsilon": 0.002,
+      "target_metric": "macro_f1",
+      "random_state": 42
+    },
+    "round1_resampler_best_params": {
+      "best_y_max": 5,
+      "target_counts": {
+        "Exploits": 22673,
+        "Fuzzers": 15110,
+        "Reconnaissance": 10000,
+        "Generic": 10000,
+        "DoS": 10000,
+        "Backdoor": 10000,
+        "Shellcode": 4725,
+        "Analysis": 3435,
+        "Worms": 395
+      },
+      "syn_deficit": {
+        "Exploits": 0,
+        "Fuzzers": 0,
+        "Reconnaissance": 3327,
+        "Generic": 5739,
+        "DoS": 6990,
+        "Backdoor": 7826,
+        "Shellcode": 3780,
+        "Analysis": 2748,
+        "Worms": 316
+      },
+      "best_score": 0.568
+    },
+    "round2_generator_best_params": {
+      "generator_type": "ctgan",
+      "fixed_gradient_updates": 42000,
+      "weights_checkpoint": "/content/drive/MyDrive/SAP-DCG/round2_best_weights.pt",
+      "diagnostics": {
+        "unified": {
+          "samples": 86338,
+          "epochs": 98,
+          "batch_size": 200,
+          "elapsed_sec": 2786.76
+        }
+      },
+      "val_score": 0.568
+    },
+    "round3_sample_filter_best_params": {
+      "best_oof_threshold": 0.4,
+      "enn_neighbors": 3,
+      "kept_samples": 813,
+      "best_score": 0.5712
+    },
+    "final_round_ids_model_best_params": {
+      "n_estimators": 100,
+      "max_depth": 10,
+      "learning_rate": 0.052220677761467035,
+      "subsample": 1.0,
+      "colsample_bytree": 0.8,
+      "random_state": 42,
+      "n_jobs": 4,
+      "tree_method": "hist",
+      "weight_power": 0.75,
+      "min_confidence": 0.3,
+      "max_fpr": 0.01
+    }
+  },
+  "tuning_rounds_summary": {
+    "round1": {
+      "component": "IntraAttackResampler",
+      "tuned_parameter": "y_max",
+      "best_value": 5,
+      "best_score": 0.568,
+      "metric": "macro_f1",
+      "details": [
+        {
+          "y_max": 1,
+          "macro_f1": 0.559,
+          "smote_resampled_rows": 690228,
+          "candidate_pool_rows": 0,
+          "filtered_syn_rows": 0,
+          "elapsed_sec": 2729.06
+        },
+        {
+          "y_max": 5,
+          "macro_f1": 0.568,
+          "smote_resampled_rows": 720954,
+          "candidate_pool_rows": 230792,
+          "filtered_syn_rows": 275,
+          "elapsed_sec": 3039.9
+        },
+        {
+          "y_max": 10,
+          "macro_f1": 0.5597,
+          "smote_resampled_rows": 729509,
+          "candidate_pool_rows": 253695,
+          "filtered_syn_rows": 552,
+          "elapsed_sec": 3101.12
+        }
+      ]
+    },
+    "round2": {
+      "component": "TabularGenerators (CTGAN)",
+      "fixed_gradient_updates": 42000,
+      "raw_candidate_pool": 230792,
+      "kept_after_default_filter": 275,
+      "val_score": 0.568,
+      "improvement_over_r1": 0.0,
+      "metric": "macro_f1"
+    },
+    "round3": {
+      "component": "SyntheticSampleFilter",
+      "best_threshold": 0.4,
+      "best_score": 0.5712,
+      "kept_synthetic_samples": 813,
+      "metric": "macro_f1",
+      "details": [
+        {
+          "threshold": 0.4,
+          "macro_f1": 0.5712,
+          "e2e_macro_f1": 0.5712,
+          "balanced_acc": 0.6263,
+          "kept_synthetic_flows": 813,
+          "elapsed_sec": 61.77
+        },
+        {
+          "threshold": 0.5,
+          "macro_f1": 0.5582,
+          "e2e_macro_f1": 0.5582,
+          "balanced_acc": 0.6112,
+          "kept_synthetic_flows": 430,
+          "elapsed_sec": 61.42
+        }
+      ]
+    }
+  },
+  "validation_performance": {
+    "split": "val",
+    "macro_f1": 0.5735,
+    "e2e_macro_f1": 0.5735,
+    "t2_macro_f1": 0.5893,
+    "t2_rare_f1": 0.4951,
+    "e2e_rare_recall": 0.6909,
+    "e2e_attack_recall": 0.6902,
+    "detection_rate": 1.0,
+    "false_alarm_rate": 0.0052,
+    "binary_f1": 0.9713,
+    "mcc": 0.9692,
+    "unknown_rate": 0.0802,
+    "balanced_accuracy": 0.7078,
+    "accuracy": 0.9703,
+    "weighted_f1": 0.9735,
+    "rare_classes": [
+      "Analysis",
+      "Backdoor",
+      "Shellcode",
+      "Worms"
+    ],
+    "per_class": {
+      "Analysis": {
+        "precision": 0.2956,
+        "recall": 0.9592,
+        "f1": 0.4519,
+        "support": 98,
+        "is_rare": true
+      },
+      "Backdoor": {
+        "precision": 0.291,
+        "recall": 0.1768,
+        "f1": 0.22,
+        "support": 311,
+        "is_rare": true
+      },
+      "Benign": {
+        "precision": 1.0,
+        "recall": 0.9948,
+        "f1": 0.9974,
+        "support": 90659,
+        "is_rare": false
+      },
+      "DoS": {
+        "precision": 0.4525,
+        "recall": 0.4651,
+        "f1": 0.4587,
+        "support": 430,
+        "is_rare": false
+      },
+      "Exploits": {
+        "precision": 0.9037,
+        "recall": 0.6548,
+        "f1": 0.7594,
+        "support": 3239,
+        "is_rare": false
+      },
+      "Fuzzers": {
+        "precision": 0.7023,
+        "recall": 0.8851,
+        "f1": 0.7832,
+        "support": 2159,
+        "is_rare": false
+      },
+      "Generic": {
+        "precision": 0.6756,
+        "recall": 0.7455,
+        "f1": 0.7088,
+        "support": 609,
+        "is_rare": false
+      },
+      "Reconnaissance": {
+        "precision": 0.6878,
+        "recall": 0.5687,
+        "f1": 0.6226,
+        "support": 953,
+        "is_rare": false
+      },
+      "Shellcode": {
+        "precision": 0.3911,
+        "recall": 0.7185,
+        "f1": 0.5065,
+        "support": 135,
+        "is_rare": true
+      },
+      "Worms": {
+        "precision": 0.7143,
+        "recall": 0.9091,
+        "f1": 0.8,
+        "support": 11,
+        "is_rare": true
+      }
+    },
+    "elapsed_sec": 5.7
+  },
+  "test_performance": {
+    "split": "test",
+    "macro_f1": 0.5396,
+    "e2e_macro_f1": 0.5396,
+    "t2_macro_f1": 0.5463,
+    "t2_rare_f1": 0.4182,
+    "e2e_rare_recall": 0.6362,
+    "e2e_attack_recall": 0.6754,
+    "detection_rate": 1.0,
+    "false_alarm_rate": 0.0049,
+    "binary_f1": 0.9726,
+    "mcc": 0.9705,
+    "unknown_rate": 0.0792,
+    "balanced_accuracy": 0.6779,
+    "accuracy": 0.9693,
+    "weighted_f1": 0.9724,
+    "rare_classes": [
+      "Analysis",
+      "Backdoor",
+      "Shellcode",
+      "Worms"
+    ],
+    "per_class": {
+      "Analysis": {
+        "precision": 0.2749,
+        "recall": 0.9439,
+        "f1": 0.4258,
+        "support": 196,
+        "is_rare": true
+      },
+      "Backdoor": {
+        "precision": 0.28,
+        "recall": 0.1691,
+        "f1": 0.2108,
+        "support": 621,
+        "is_rare": true
+      },
+      "Benign": {
+        "precision": 1.0,
+        "recall": 0.9951,
+        "f1": 0.9975,
+        "support": 181319,
+        "is_rare": false
+      },
+      "DoS": {
+        "precision": 0.4038,
+        "recall": 0.4,
+        "f1": 0.4019,
+        "support": 860,
+        "is_rare": false
+      },
+      "Exploits": {
+        "precision": 0.9013,
+        "recall": 0.6332,
+        "f1": 0.7439,
+        "support": 6478,
+        "is_rare": false
+      },
+      "Fuzzers": {
+        "precision": 0.6851,
+        "recall": 0.8733,
+        "f1": 0.7679,
+        "support": 4318,
+        "is_rare": false
+      },
+      "Generic": {
+        "precision": 0.6606,
+        "recall": 0.7403,
+        "f1": 0.6982,
+        "support": 1217,
+        "is_rare": false
+      },
+      "Reconnaissance": {
+        "precision": 0.6834,
+        "recall": 0.592,
+        "f1": 0.6344,
+        "support": 1907,
+        "is_rare": false
+      },
+      "Shellcode": {
+        "precision": 0.4,
+        "recall": 0.6593,
+        "f1": 0.4979,
+        "support": 270,
+        "is_rare": true
+      },
+      "Worms": {
+        "precision": 0.4359,
+        "recall": 0.7727,
+        "f1": 0.5574,
+        "support": 22,
+        "is_rare": true
+      }
+    },
+    "elapsed_sec": 12.29
+  },
+  "holdout_performance": {
+    "split": "holdout",
+    "macro_f1": 0.5591,
+    "e2e_macro_f1": 0.5591,
+    "t2_macro_f1": 0.5691,
+    "t2_rare_f1": 0.4674,
+    "e2e_rare_recall": 0.6637,
+    "e2e_attack_recall": 0.6804,
+    "detection_rate": 1.0,
+    "false_alarm_rate": 0.0048,
+    "binary_f1": 0.9735,
+    "mcc": 0.9715,
+    "unknown_rate": 0.0746,
+    "balanced_accuracy": 0.6895,
+    "accuracy": 0.9699,
+    "weighted_f1": 0.9728,
+    "rare_classes": [
+      "Analysis",
+      "Backdoor",
+      "Shellcode",
+      "Worms"
+    ],
+    "per_class": {
+      "Analysis": {
+        "precision": 0.2854,
+        "recall": 0.9878,
+        "f1": 0.4428,
+        "support": 245,
+        "is_rare": true
+      },
+      "Backdoor": {
+        "precision": 0.2681,
+        "recall": 0.157,
+        "f1": 0.1981,
+        "support": 777,
+        "is_rare": true
+      },
+      "Benign": {
+        "precision": 1.0,
+        "recall": 0.9952,
+        "f1": 0.9976,
+        "support": 226650,
+        "is_rare": false
+      },
+      "DoS": {
+        "precision": 0.4104,
+        "recall": 0.3981,
+        "f1": 0.4042,
+        "support": 1075,
+        "is_rare": false
+      },
+      "Exploits": {
+        "precision": 0.8978,
+        "recall": 0.6442,
+        "f1": 0.7501,
+        "support": 8097,
+        "is_rare": false
+      },
+      "Fuzzers": {
+        "precision": 0.6994,
+        "recall": 0.8799,
+        "f1": 0.7794,
+        "support": 5397,
+        "is_rare": false
+      },
+      "Generic": {
+        "precision": 0.6736,
+        "recall": 0.7431,
+        "f1": 0.7067,
+        "support": 1522,
+        "is_rare": false
+      },
+      "Reconnaissance": {
+        "precision": 0.6622,
+        "recall": 0.5799,
+        "f1": 0.6183,
+        "support": 2383,
+        "is_rare": false
+      },
+      "Shellcode": {
+        "precision": 0.347,
+        "recall": 0.6528,
+        "f1": 0.4531,
+        "support": 337,
+        "is_rare": true
+      },
+      "Worms": {
+        "precision": 0.75,
+        "recall": 0.8571,
+        "f1": 0.8,
+        "support": 28,
+        "is_rare": true
+      }
+    },
+    "elapsed_sec": 15.65
+  },
+  "synthetic_quality": {
+    "coverage": {
+      "classes_covered": "5/10",
+      "missing_classes": [
+        "Analysis",
+        "Benign",
+        "Exploits",
+        "Fuzzers",
+        "Worms"
+      ]
+    },
+    "validity": {
+      "invalid_row_rate": 0.0,
+      "neg_cell_rate": 0.0,
+      "nonint_cell_rate": 0.0,
+      "over_max_cell_rate": 0.0
+    },
+    "fidelity": {
+      "ks_mean": 0.1974,
+      "corr_diff_mean": 0.191,
+      "tail_q99_log_ratio": 0.4423
+    },
+    "privacy": {
+      "exact_copy_rate": 0.2202,
+      "dcr_train_p5": 0.0,
+      "dcr_holdout_p5": 0.6835,
+      "closer_to_train_rate": 0.8536
+    },
+    "utility": {
+      "trtr_macro_f1": 0.6224,
+      "tstr_macro_f1": 0.0714,
+      "ml_efficacy_ratio": 0.1147,
+      "trs_macro_f1": 0.6205,
+      "trs_rare_f1": 0.5783,
+      "aug_gain_macro_f1": -0.0018,
+      "aug_gain_rare_f1": -0.0021
+    }
+  },
+  "distribution_distances": {
+    "mean_normalized_wasserstein_distance": 0.00119,
+    "centroid_euclidean_distance": 0.0967,
+    "continuous_features_analyzed": 36,
+    "top_divergent_features": [
+      [
+        "MAX_IP_PKT_LEN",
+        0.00906
+      ],
+      [
+        "LONGEST_FLOW_PKT",
+        0.00903
+      ],
+      [
+        "MAX_TTL",
+        0.00264
+      ],
+      [
+        "TCP_WIN_MAX_OUT",
+        0.00256
+      ],
+      [
+        "MIN_TTL",
+        0.00215
+      ]
+    ]
+  }
+}

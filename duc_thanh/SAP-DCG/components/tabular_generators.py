@@ -2,13 +2,19 @@
 """
 Tabular Deep Generative Models: CTGAN & TVAE (Component 2)
 
-Implements Component 2 according to components.txt and dataset.txt:
-- Model management for CTGAN and TVAE tabular generators.
-- Weight persistence & checkpoint storage (saving/loading best weights).
-- Training loop adhering to fixed gradient update budget (default: 42,000 steps).
-- Drawing up to 10 * n_syn candidate synthetic records per minority class.
-
-Hyperparameter tuning (Optuna) has been consolidated into `PipelineTuner`.
+Derived from Minh's CTGAN/TVAE training and tuning pipeline (`minh/src/ctgan_pipeline.py`,
+`minh/src/fix_pipeline.py`, and `minh/notebooks/07_tune_ctgan.ipynb`):
+- NetFlow-aware preprocessing (fit_prep, transform, inverse):
+  - Categorical handling with TOP_K common codes and rare value reconstruction.
+  - Dropping constant and quasi-constant columns, restored on inverse.
+  - Log1p transform on skewed numeric features (skew > 5), expm1 on inverse.
+  - Post-generation validity constraints: clipping to real max, non-negative bounds,
+    and rounding integer count columns (packets, bytes).
+- Batch size and pac alignment (step = pac if pac % 2 == 0 else pac * 2).
+- Conditional generation with rejection sampling (sample_by_class / sample_matched) for CTGAN:
+  Enforces exact class match, filters misconditioned flows, reports shortfalls.
+- Pool sampling by class quota for TVAE (sample_pool_by_class).
+- Checkpoint persistence and gradient update budget alignment.
 """
 
 import os
@@ -36,16 +42,144 @@ if str(curr_dir) not in sys.path:
 
 from intra_attack_resampler import CATEGORICAL_FEATURES, resolve_paths
 
+# Candidate categorical / discrete code columns in NetFlow schemas
+CAT_CANDIDATES = [
+    "PROTOCOL", "L7_PROTO", "TCP_FLAGS", "CLIENT_TCP_FLAGS", "SERVER_TCP_FLAGS",
+    "ICMP_TYPE", "ICMP_IPV4_TYPE", "DNS_QUERY_TYPE", "FTP_COMMAND_RET_CODE",
+    "MIN_TTL", "MAX_TTL"
+]
+ID_COLS = ["DNS_QUERY_ID"]
+TOP_K_CATEGORICAL = 30
+SKEW_LIMIT = 5.0
+
+CTGAN_DIMS = {
+    "256x256": (256, 256),
+    "256x256x256": (256, 256, 256),
+    "512x512": (512, 512),
+}
+
+
+class NetFlowPreprocessor:
+    """
+    Learns feature transformations, bounds, and categorical encodings strictly from real training data.
+    Derived from `minh/src/fix_pipeline.py`.
+    """
+
+    def __init__(self, label_col: str = "Attack", top_k: int = TOP_K_CATEGORICAL, skew_limit: float = SKEW_LIMIT):
+        self.label_col = label_col
+        self.top_k = top_k
+        self.skew_limit = skew_limit
+        self.meta: Dict[str, Any] = {}
+
+    def fit(self, df: pd.DataFrame) -> "NetFlowPreprocessor":
+        p: Dict[str, Any] = {}
+        clean_df = df.replace([np.inf, -np.inf], np.nan)
+
+        # Categoricals: candidate columns + any object columns present
+        obj_cols = [c for c in clean_df.columns if clean_df[c].dtype == "object" and c != self.label_col]
+        p["cat"] = [c for c in CAT_CANDIDATES if c in clean_df.columns and c != self.label_col]
+        for c in obj_cols:
+            if c not in p["cat"]:
+                p["cat"].append(c)
+
+        # Drop constant, ID, or quasi-constant (>99.9% identical) columns
+        drop_dict = {}
+        for c in clean_df.columns:
+            if c == self.label_col or c == "Label":
+                continue
+            if c in ID_COLS or clean_df[c].nunique(dropna=True) <= 1:
+                mode_val = clean_df[c].mode(dropna=True)
+                drop_dict[c] = mode_val.iloc[0] if len(mode_val) > 0 else 0
+            elif clean_df[c].value_counts(normalize=True, dropna=True).iloc[0] > 0.999:
+                drop_dict[c] = clean_df[c].mode(dropna=True).iloc[0]
+
+        p["drop"] = drop_dict
+        p["cat"] = [c for c in p["cat"] if c not in p["drop"]]
+        p["num"] = [c for c in clean_df.columns if c not in p["cat"] + list(p["drop"]) + [self.label_col, "Label"]]
+
+        # Top K categories and rare values for reconstruction
+        p["top"] = {c: set(clean_df[c].value_counts().index[:self.top_k]) for c in p["cat"]}
+        p["rare_vals"] = {c: clean_df.loc[~clean_df[c].isin(p["top"][c]), c].dropna().to_numpy() for c in p["cat"]}
+
+        # Skewed continuous features -> log1p
+        p["log"] = [c for c in p["num"] if clean_df[c].min() >= 0 and clean_df[c].skew() > self.skew_limit]
+        p["median"] = clean_df[p["num"]].median().fillna(0.0)
+        p["max"] = clean_df[p["num"]].max().fillna(1.0)
+        p["min"] = clean_df[p["num"]].min().fillna(0.0)
+        p["is_int"] = {c: bool(np.all(np.isclose(clean_df[c].dropna() % 1, 0))) for c in p["num"]}
+        p["order"] = list(df.columns)
+
+        self.meta = p
+        return self
+
+    @staticmethod
+    def _as_str(series: pd.Series) -> np.ndarray:
+        if series.dtype.kind in "iuf":
+            return series.map(
+                lambda v: "nan" if pd.isna(v) else (str(int(v)) if float(v).is_integer() else str(v))
+            ).to_numpy()
+        return series.astype(str).to_numpy()
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.meta
+        clean_df = df.replace([np.inf, -np.inf], np.nan)
+        drop_cols = [c for c in p["drop"] if c in clean_df.columns]
+        out = clean_df.drop(columns=drop_cols).copy()
+
+        for c in p["num"]:
+            if c in out.columns:
+                out[c] = out[c].fillna(p["median"][c])
+                if c in p["log"]:
+                    out[c] = np.log1p(out[c].clip(lower=0))
+
+        for c in p["cat"]:
+            if c in out.columns:
+                out[c] = np.where(out[c].isin(p["top"][c]), self._as_str(out[c]), "other")
+
+        return out
+
+    def inverse(self, syn: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+        p = self.meta
+        rng = np.random.default_rng(seed)
+        out = syn.copy()
+
+        for c in p["num"]:
+            if c in out.columns:
+                if c in p["log"]:
+                    out[c] = np.expm1(out[c])
+                # Validity clipping: lower bound at 0 if real was non-negative, upper bound at real max
+                lower_bound = 0.0 if p["min"][c] >= 0 else p["min"][c]
+                out[c] = out[c].clip(lower=lower_bound, upper=p["max"][c])
+                if p["is_int"][c]:
+                    out[c] = out[c].round()
+
+        for c in p["cat"]:
+            if c in out.columns:
+                m = out[c] == "other"
+                if m.any() and len(p["rare_vals"][c]) > 0:
+                    out.loc[m, c] = rng.choice(p["rare_vals"][c], size=int(m.sum()))
+                out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+
+        for c, v in p["drop"].items():
+            out[c] = v
+
+        # Align columns to original order
+        target_cols = [c for c in p["order"] if c in out.columns]
+        extra_cols = [c for c in out.columns if c not in target_cols]
+        return out[target_cols + extra_cols]
+
 
 class TabularGenerators:
     """
     Manager for CTGAN and TVAE Generative Models for Network Intrusion Data.
+    Derived from Minh's training and tuning architecture.
 
     Features:
-      - Model selection: 'ctgan' or 'tvae'.
-      - Fixed gradient update budget (default: 42,000 steps).
-      - Checkpoint persistence for model weights.
-      - Scaled generation drawing up to 10 * n_syn per class for post-processing.
+      - NetFlow preprocessing & post-generation validity enforcement.
+      - Fixed gradient update budget calculation (default: 42,000 steps).
+      - Conditional generation with rejection sampling (sample_by_class) for CTGAN.
+      - Pool sampling for TVAE (sample_pool_by_class).
+      - Weight persistence & checkpoint storage.
     """
 
     def __init__(
@@ -79,6 +213,8 @@ class TabularGenerators:
         self.weights_dir.mkdir(parents=True, exist_ok=True)
 
         self.models: Dict[str, Any] = {}
+        self.unified_model: Optional[Any] = None
+        self.preprocessor: Optional[NetFlowPreprocessor] = None
         self.best_weights_path: Optional[Path] = None
         self.training_diagnostics: Dict[str, Any] = {}
 
@@ -94,24 +230,25 @@ class TabularGenerators:
             epochs = min(epochs, max_epochs_cap)
         return max(1, epochs)
 
-    def _resolve_batch_size_and_pac(self, n_samples: int, requested_batch_size: int) -> Tuple[int, int]:
+    def _resolve_batch_size_and_pac(self, n_samples: int, requested_batch_size: int, requested_pac: int = 10) -> Tuple[int, int]:
         """
         Ensures batch_size is compatible with CTGAN's pac constraint:
           batch_size % pac == 0 and batch_size % 2 == 0
+          bs not larger than the data
         """
         if n_samples >= 100:
-            pac = 10
+            pac = requested_pac
         elif n_samples >= 20:
-            pac = 2
+            pac = min(requested_pac, 2)
         else:
             pac = 1
 
         step = pac if pac % 2 == 0 else pac * 2
         batch_size = (requested_batch_size // step) * step
-        batch_size = max(step, min(batch_size, (n_samples // step) * step))
+        batch_size = max(step * 2, min(batch_size, (n_samples // step) * step))
         if batch_size == 0:
-            batch_size = step
-        return batch_size, pac
+            batch_size = max(step * 2, step)
+        return int(batch_size), int(pac)
 
     def train(
         self,
@@ -119,133 +256,273 @@ class TabularGenerators:
         syn_deficit: Dict[str, int],
         feature_cols: Optional[List[str]] = None,
         categorical_cols: Optional[List[str]] = None,
-        batch_size: int = 200,
+        batch_size: int = 500,
         epochs: Optional[int] = None,
+        pac: int = 10,
+        embedding_dim: int = 128,
+        unified_generator: bool = True,
         verbose: bool = False,
         **model_kwargs,
     ) -> Dict[str, Any]:
         """
-        Trains a generator model for each minority attack class requiring synthetic generation.
-
-        Parameters:
-          train_attacks: Real attack flows from Step 4
-          syn_deficit: Dictionary of n_syn deficit values per class (from Step 5)
-          feature_cols: List of flow feature column names
-          categorical_cols: List of categorical feature names for CTGAN/TVAE handling
-          batch_size: Desired training batch size
-          epochs: Optional epoch override. If None, derived from fixed_gradient_updates (42k)
-          model_kwargs: Additional hyperparameters (e.g., generator_lr, discriminator_lr)
-
-        Returns:
-          Diagnostics dictionary containing training times and epoch counts.
+        Trains CTGAN/TVAE on attack flows.
+        Supports both:
+          - Unified generator (Minh's design): One generator conditioned on 'Attack' column.
+          - Per-minority-class generators: Slices model per minority class.
         """
-        t0 = time.time()
-        if feature_cols is None:
-            feature_cols = [c for c in train_attacks.columns if c not in ["Label", "Attack"]]
-        if categorical_cols is None:
-            categorical_cols = [c for c in CATEGORICAL_FEATURES if c in feature_cols]
+        import torch
+        torch.manual_seed(self.random_state)
+        np.random.seed(self.random_state)
 
+        t0 = time.time()
         target_classes = [cls for cls, n_syn in syn_deficit.items() if n_syn > 0]
-        print(f"\n>>> [Generators Train] Training {self.model_type.upper()} for {len(target_classes)} minority attack classes...")
+        print(f"\n>>> [Generators Train] Training {self.model_type.upper()} ({'Unified' if unified_generator else 'Per-Class'})...")
         print(f"    Target Classes:          {target_classes}")
         print(f"    Fixed Gradient Updates:  {self.fixed_gradient_updates:,} steps")
         print(f"    Compute Device:          {self.device.upper()}")
 
-        self.models = {}
+        # Initialize and fit NetFlow preprocessor
+        self.preprocessor = NetFlowPreprocessor(label_col="Attack")
+        self.preprocessor.fit(train_attacks)
+        transformed_attacks = self.preprocessor.transform(train_attacks)
+
         diagnostics = {}
+        use_cuda = (self.device != "cpu")
 
-        for cls_name in target_classes:
-            df_cls = train_attacks[train_attacks["Attack"] == cls_name][feature_cols].copy()
-            n_samples = len(df_cls)
-            if n_samples == 0:
-                continue
+        if unified_generator:
+            # Train a unified generator across all attack flows
+            n_samples = len(transformed_attacks)
+            bs, resolved_pac = self._resolve_batch_size_and_pac(n_samples, batch_size, pac)
+            calc_epochs = epochs if epochs is not None else self.calculate_epochs(n_samples, bs)
 
-            cls_bs, pac = self._resolve_batch_size_and_pac(n_samples, batch_size)
-            cls_epochs = epochs if epochs is not None else self.calculate_epochs(n_samples, cls_bs)
+            discrete_cols = [c for c in self.preprocessor.meta["cat"] if c in transformed_attacks.columns]
+            if "Attack" not in discrete_cols and "Attack" in transformed_attacks.columns:
+                discrete_cols.append("Attack")
 
-            print(f"    - Training '{cls_name}' ({n_samples} real flows): {cls_epochs} epochs (bs={cls_bs}, pac={pac})...")
-            t_cls = time.time()
+            print(f"    - Fitting Unified {self.model_type.upper()} ({n_samples:,} flows, {calc_epochs} epochs, bs={bs}, pac={resolved_pac})...")
+
+            clean_kwargs = {k: v for k, v in model_kwargs.items() if k not in ["epochs", "batch_size", "pac", "cuda", "verbose"]}
+            if "generator_dim" in clean_kwargs and isinstance(clean_kwargs["generator_dim"], str):
+                clean_kwargs["generator_dim"] = CTGAN_DIMS.get(clean_kwargs["generator_dim"], (256, 256))
+            if "discriminator_dim" in clean_kwargs and isinstance(clean_kwargs["discriminator_dim"], str):
+                clean_kwargs["discriminator_dim"] = CTGAN_DIMS.get(clean_kwargs["discriminator_dim"], (256, 256))
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 if self.model_type == "ctgan":
                     model = CTGAN(
-                        epochs=cls_epochs,
-                        batch_size=cls_bs,
-                        pac=pac,
+                        epochs=calc_epochs,
+                        batch_size=bs,
+                        pac=resolved_pac,
+                        embedding_dim=embedding_dim,
+                        cuda=use_cuda,
                         verbose=verbose,
-                        cuda=(self.device != "cpu"),
-                        **model_kwargs,
+                        **clean_kwargs,
                     )
-                else:  # tvae
+                else:
                     model = TVAE(
-                        epochs=cls_epochs,
-                        batch_size=cls_bs,
-                        cuda=(self.device != "cpu"),
-                        **model_kwargs,
+                        epochs=calc_epochs,
+                        batch_size=bs,
+                        embedding_dim=embedding_dim,
+                        cuda=use_cuda,
+                        verbose=verbose,
+                        **clean_kwargs,
                     )
 
-                # Fit model on class slice with specified categorical columns
-                model.fit(df_cls, discrete_columns=categorical_cols)
+                model.fit(transformed_attacks, discrete_columns=discrete_cols)
 
-            elapsed_cls = time.time() - t_cls
-            self.models[cls_name] = model
-            diagnostics[cls_name] = {
+            self.unified_model = model
+            self.models = {"unified": model}
+            diagnostics["unified"] = {
                 "samples": n_samples,
-                "epochs": cls_epochs,
-                "batch_size": cls_bs,
-                "elapsed_sec": round(elapsed_cls, 2),
+                "epochs": calc_epochs,
+                "batch_size": bs,
+                "elapsed_sec": round(time.time() - t0, 2),
             }
+        else:
+            # Per-minority-class models
+            self.models = {}
+            for cls_name in target_classes:
+                df_cls = transformed_attacks[transformed_attacks["Attack"] == cls_name].copy()
+                n_samples = len(df_cls)
+                if n_samples == 0:
+                    continue
+
+                bs, resolved_pac = self._resolve_batch_size_and_pac(n_samples, batch_size, pac)
+                cls_epochs = epochs if epochs is not None else self.calculate_epochs(n_samples, bs)
+
+                discrete_cols = [c for c in self.preprocessor.meta["cat"] if c in df_cls.columns]
+                t_cls = time.time()
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    if self.model_type == "ctgan":
+                        model = CTGAN(
+                            epochs=cls_epochs,
+                            batch_size=bs,
+                            pac=resolved_pac,
+                            embedding_dim=embedding_dim,
+                            cuda=use_cuda,
+                            verbose=verbose,
+                            **model_kwargs,
+                        )
+                    else:
+                        model = TVAE(
+                            epochs=cls_epochs,
+                            batch_size=bs,
+                            embedding_dim=embedding_dim,
+                            cuda=use_cuda,
+                            verbose=verbose,
+                            **model_kwargs,
+                        )
+                    model.fit(df_cls, discrete_columns=discrete_cols)
+
+                self.models[cls_name] = model
+                diagnostics[cls_name] = {
+                    "samples": n_samples,
+                    "epochs": cls_epochs,
+                    "batch_size": bs,
+                    "elapsed_sec": round(time.time() - t_cls, 2),
+                }
 
         total_elapsed = time.time() - t0
         self.training_diagnostics = diagnostics
-        print(f"    All {len(self.models)} generator models trained in {total_elapsed:.2f}s.\n")
+        print(f"    Generators training completed in {total_elapsed:.2f}s.\n")
         return diagnostics
 
     def sample(
         self,
         syn_deficit: Dict[str, int],
         multiplier: int = 10,
+        max_rounds: int = 10,
+        verbose: bool = False,
     ) -> pd.DataFrame:
         """
-        Instructs the generators to draw up to multiplier * n_syn records
-        (Step 8: draw up to 10 * n_syn for subsequent post-processing in Component 3).
+        Samples synthetic flows according to syn_deficit.
+        For CTGAN: Uses conditional rejection sampling (`sample_by_class`).
+        For TVAE: Uses pool sampling (`sample_pool_by_class`).
+        Applies inverse transformation with validity clipping and integer rounding.
         """
-        print(f">>> [Generators Sample] Drawing up to {multiplier}x n_syn synthetic flows per minority class...")
-        synthetic_records = []
+        print(f">>> [Generators Sample] Drawing candidate synthetic pool ({multiplier}x deficit quota)...")
+        quotas = {cls: int(multiplier * n) for cls, n in syn_deficit.items() if n > 0}
+        if not quotas:
+            return pd.DataFrame()
 
-        for cls_name, model in self.models.items():
-            n_syn = syn_deficit.get(cls_name, 0)
-            if n_syn <= 0:
-                continue
+        t0 = time.time()
+        raw_parts = []
 
-            draw_count = int(multiplier * n_syn)
-            print(f"    - Sampling {draw_count:,} candidate flows for '{cls_name}' ({n_syn:,} needed)...")
+        if self.unified_model is not None:
+            if self.model_type == "ctgan":
+                # Conditional rejection sampling (Minh's sample_by_class)
+                report = []
+                for cls, quota_n in quotas.items():
+                    kept, drawn, rounds, hits = [], 0, 0, 0
+                    need = quota_n
+                    while need > 0 and rounds < max_rounds:
+                        rate = hits / drawn if drawn else 0.5
+                        size = int(min(50_000, np.ceil(need * max(2.0, 1.5 / max(rate, 0.005))) + 10))
+                        try:
+                            batch = self.unified_model.sample(size, condition_column="Attack", condition_value=cls)
+                        except Exception:
+                            # Fallback if condition not supported
+                            batch = self.unified_model.sample(size)
 
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                df_syn = model.sample(draw_count)
+                        drawn += len(batch)
+                        if "Attack" in batch.columns:
+                            match = batch[batch["Attack"] == cls]
+                        else:
+                            match = batch.copy()
+                            match["Attack"] = cls
 
-            df_syn["Attack"] = cls_name
-            df_syn["Label"] = 1
-            synthetic_records.append(df_syn)
+                        hits += len(match)
+                        kept.append(match.head(need))
+                        need = quota_n - sum(len(k) for k in kept)
+                        rounds += 1
 
-        if synthetic_records:
-            df_synthetic = pd.concat(synthetic_records, ignore_index=True)
+                    got = pd.concat(kept, ignore_index=True) if kept else pd.DataFrame()
+                    report.append((cls, quota_n, len(got), drawn, len(got) / drawn if drawn else 0.0))
+                    raw_parts.append(got)
+
+                if verbose:
+                    rep_df = pd.DataFrame(report, columns=["class", "quota", "got", "drawn", "match_rate"])
+                    print(rep_df.to_string(index=False))
+            else:
+                # TVAE pool sampling (Minh's sample_pool_by_class)
+                need = dict(quotas)
+                kept = {c: [] for c in quotas}
+                drawn = 0
+                hits = {c: 0 for c in quotas}
+                for _ in range(max_rounds * 2):
+                    if all(v <= 0 for v in need.values()):
+                        break
+                    batch_draw = min(50_000, max(5_000, sum(need.values()) * 2))
+                    pool = self.unified_model.sample(batch_draw)
+                    drawn += len(pool)
+                    for cls in quotas:
+                        if need[cls] <= 0:
+                            continue
+                        if "Attack" in pool.columns:
+                            m = pool[pool["Attack"] == cls]
+                        else:
+                            m = pool.head(need[cls]).copy()
+                            m["Attack"] = cls
+
+                        hits[cls] += len(m)
+                        take = m.head(need[cls])
+                        kept[cls].append(take)
+                        need[cls] -= len(take)
+
+                for v in kept.values():
+                    if v:
+                        raw_parts.append(pd.concat(v, ignore_index=True))
         else:
-            df_synthetic = pd.DataFrame()
+            # Per-class generator sampling
+            for cls_name, model in self.models.items():
+                if cls_name not in quotas:
+                    continue
+                draw_count = quotas[cls_name]
+                batch = model.sample(draw_count)
+                batch["Attack"] = cls_name
+                raw_parts.append(batch)
 
-        print(f"    Generated Raw Candidate Pool: {len(df_synthetic):,} synthetic flows across {len(synthetic_records)} classes.\n")
-        return df_synthetic
+        if not raw_parts:
+            return pd.DataFrame()
 
-    def save_weights(self, filename: Optional[str] = None) -> Path:
-        """Saves current generator weights/checkpoints for all class models."""
+        df_raw = pd.concat(raw_parts, ignore_index=True)
+
+        # Apply inverse transformation for validity (bounds clipping, expm1, integer rounding)
+        if self.preprocessor is not None:
+            df_syn = self.preprocessor.inverse(df_raw, seed=self.random_state)
+        else:
+            df_syn = df_raw
+
+        # Ensure Label = 1 for all synthetic attack flows
+        df_syn["Label"] = 1
+
+        elapsed = time.time() - t0
+        print(f"    Generated Raw Candidate Pool: {len(df_syn):,} synthetic flows across {len(quotas)} classes in {elapsed:.2f}s.\n")
+        return df_syn
+
+    def save_weights(self, filename: Optional[Union[str, Path]] = None) -> Path:
+        """Saves generator weights and preprocessor state."""
         if filename is None:
-            filename = f"{self.model_type}_best_weights.pt"
-        save_path = self.weights_dir / filename
+            save_path = self.weights_dir / f"{self.model_type}_best_weights.pt"
+        else:
+            p = Path(filename)
+            if p.is_absolute() or str(filename).find("/") != -1 or str(filename).find("\\") != -1:
+                save_path = p.resolve()
+            else:
+                save_path = self.weights_dir / p
 
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "models": self.models,
+            "unified_model": self.unified_model,
+            "preprocessor": self.preprocessor,
+            "diagnostics": self.training_diagnostics,
+        }
         with open(save_path, "wb") as f:
-            pickle.dump(self.models, f)
+            pickle.dump(state, f)
 
         self.best_weights_path = save_path
         print(f"    [Generators Checkpoint] Saved weights to: {save_path.name}")
@@ -259,16 +536,27 @@ class TabularGenerators:
             return False
 
         with open(load_path, "rb") as f:
-            self.models = pickle.load(f)
+            state = pickle.load(f)
+
+        if isinstance(state, dict) and "unified_model" in state:
+            self.models = state.get("models", {})
+            self.unified_model = state.get("unified_model", None)
+            self.preprocessor = state.get("preprocessor", None)
+            self.training_diagnostics = state.get("diagnostics", {})
+        else:
+            self.models = state
+
         print(f"    [Generators Checkpoint] Loaded weights from: {load_path.name}")
         return True
 
 
 __all__ = [
     "TabularGenerators",
+    "NetFlowPreprocessor",
+    "CTGAN_DIMS",
+    "CAT_CANDIDATES",
 ]
 
 
 if __name__ == "__main__":
     print("Component 2 (tabular_generators.py) loaded successfully.")
-

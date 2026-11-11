@@ -65,41 +65,45 @@ CATEGORICAL_FEATURES = [
 # ============================================================================
 # Directory Resolution Helper
 # ============================================================================
-def resolve_paths() -> Tuple[Path, Path, Path]:
+def resolve_paths(dataset_dir: Optional[Union[str, Path]] = None) -> Tuple[Path, Path, Path]:
     """
-    Resolves repository root, raw dataset location, and export directories.
+    Resolves repository root, raw dataset location, and the SAP-DCG dataset directory.
+
+    Returns:
+      (base_dir, raw_csv_path, new_dataset_dir)
+      where new_dataset_dir is the dedicated `dataset/` folder inside `SAP-DCG`.
     """
     current_script_dir = Path(__file__).resolve().parent
-    repo_roots = [
-        current_script_dir.parent,
-        current_script_dir.parents[1] if len(current_script_dir.parents) > 1 else current_script_dir,
-        current_script_dir.parents[2] if len(current_script_dir.parents) > 2 else current_script_dir,
-        current_script_dir,
-        Path.cwd(),
-        Path("/run/media/thanh/Data/Project A/duc_thanh"),
-        Path("/run/media/thanh/Ventoy/Project A/duc_thanh"),
-    ]
+    sap_dir = current_script_dir.parent if current_script_dir.name == "components" else current_script_dir
+    base_dir = sap_dir.parent
 
-    base_dir = None
-    for r in repo_roots:
-        if (r / "datasets/NetFlow").exists():
-            base_dir = r.resolve()
+    # New dataset folder inside SAP-DCG
+    if dataset_dir is not None:
+        new_dataset_dir = Path(dataset_dir).resolve()
+    else:
+        new_dataset_dir = sap_dir / "dataset"
+    new_dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    # Locate raw NF-UNSW-NB15-v3.csv dataset (priority to SAP-DCG/dataset)
+    raw_candidates = [
+        new_dataset_dir / "original/NF-UNSW-NB15-v3.csv",
+        new_dataset_dir / "NF-UNSW-NB15-v3.csv",
+        base_dir / "datasets/NetFlow/NF-UNSW-NB15-v3/f7546561558c07c5_NFV3DATA-A11964_A11964/data/NF-UNSW-NB15-v3.csv",
+        base_dir / "datasets/NetFlow_resampled/NF-UNSW-NB15-v3.csv",
+    ]
+    raw_csv_path = None
+    for cand in raw_candidates:
+        if cand.exists():
+            raw_csv_path = cand.resolve()
             break
 
-    if base_dir is None:
-        raise FileNotFoundError("Could not resolve workspace base directory with datasets/NetFlow!")
-
-    raw_csv_path = base_dir / "datasets/NetFlow/NF-UNSW-NB15-v3/f7546561558c07c5_NFV3DATA-A11964_A11964/data/NF-UNSW-NB15-v3.csv"
-    if not raw_csv_path.exists():
-        found = list(base_dir.glob("**/NF-UNSW-NB15-v3.csv"))
+    if raw_csv_path is None:
+        found = list(new_dataset_dir.glob("**/NF-UNSW-NB15-v3.csv")) or list(base_dir.glob("**/NF-UNSW-NB15-v3.csv"))
         if not found:
-            raise FileNotFoundError(f"Raw NF-UNSW-NB15-v3.csv not found under {base_dir}!")
-        raw_csv_path = found[0]
+            raise FileNotFoundError(f"Raw NF-UNSW-NB15-v3.csv not found under {new_dataset_dir} or {base_dir}!")
+        raw_csv_path = found[0].resolve()
 
-    final_datasets_dir = base_dir / "datasets/final datasets"
-    final_datasets_dir.mkdir(parents=True, exist_ok=True)
-
-    return base_dir, raw_csv_path, final_datasets_dir
+    return base_dir, raw_csv_path, new_dataset_dir
 
 
 # ============================================================================

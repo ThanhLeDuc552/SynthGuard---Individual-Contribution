@@ -8,8 +8,12 @@ protocol-aware sample filtering, final IDS classification, and multi-round hyper
 from .components import (
     IntraAttackResampler,
     TabularGenerators,
+    NetFlowPreprocessor,
     SyntheticSampleFilter,
     FinalIDSModel,
+    Preprocessor,
+    AnomalyDetector,
+    evaluate_synthetic_quality,
     SHORTCUT_COLS,
     CATEGORICAL_FEATURES,
     resolve_paths,
@@ -25,8 +29,12 @@ __all__ = [
     # Core Components
     "IntraAttackResampler",
     "TabularGenerators",
+    "NetFlowPreprocessor",
     "SyntheticSampleFilter",
     "FinalIDSModel",
+    "Preprocessor",
+    "AnomalyDetector",
+    "evaluate_synthetic_quality",
     # Orchestration & Tuning
     "PipelineTuner",
     "SequentialTuningPipeline",

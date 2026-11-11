@@ -15,15 +15,31 @@ from .intra_attack_resampler import (
     resolve_paths,
     run_full_pipeline,
 )
-from .tabular_generators import TabularGenerators
+from .tabular_generators import (
+    TabularGenerators,
+    NetFlowPreprocessor,
+    CTGAN_DIMS,
+    CAT_CANDIDATES,
+)
 from .synthetic_sample_filter import SyntheticSampleFilter
-from .final_ids_model import FinalIDSModel
+from .final_ids_model import (
+    FinalIDSModel,
+    Preprocessor,
+    AnomalyDetector,
+    evaluate_synthetic_quality,
+)
 
 __all__ = [
     "IntraAttackResampler",
     "TabularGenerators",
+    "NetFlowPreprocessor",
+    "CTGAN_DIMS",
+    "CAT_CANDIDATES",
     "SyntheticSampleFilter",
     "FinalIDSModel",
+    "Preprocessor",
+    "AnomalyDetector",
+    "evaluate_synthetic_quality",
     "SHORTCUT_COLS",
     "CATEGORICAL_FEATURES",
     "resolve_paths",

@@ -13,9 +13,12 @@ Implements the complete pipeline workflow defined in components.txt:
 - Final Round: Tune FinalIDSModel (Final IDS Model) on best augmented data, then report
   final metrics on Val, Test, and Holdout sets, along with dataset distance to the validation distribution.
 
+All optimal hyperparameters, model weights, resampled datasets, metrics JSON, and a comprehensive
+Markdown evaluation report (`evaluation_report.md`) are exported to the designated destination folder.
+
 Usage:
     python run_pipeline.py --help
-    python run_pipeline.py --generator ctgan --epsilon 0.002
+    python run_pipeline.py --generator ctgan --epsilon 0.002 --output-dir outputs/run_experiment_1
 """
 
 import sys
@@ -71,7 +74,10 @@ def main():
         fixed_gradient_updates=args.fixed_updates,
         random_state=args.random_state,
         final_dir=final_dir,
+        output_dir=args.output_dir,
     )
+
+    print(f"Destination Output Directory: {orchestrator.output_dir}\n")
 
     orchestrator.run_pipeline(
         train_df=df_train,
