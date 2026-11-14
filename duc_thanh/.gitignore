@@ -21,10 +21,5 @@ venv/
 
 # Data artifacts & Large outputs
 *.csv
-synthetic_samples_kept.csv
-unsw_nb15_final_pipeline_train.csv
 SAP-DCG/dataset/
-SAP-DCG/results/*.csv
-SAP-DCG/results/*.joblib
-SAP-DCG/results/*.pt
-SAP-DCG/results/weights/
+SAP-DCG/results/

@@ -8,6 +8,10 @@ Components:
 - Component 4: FinalIDSModel (final_ids_model.py)
 """
 
+from .dataset_splitter import (
+    DatasetSplitter,
+    split_benign_attack,
+)
 from .intra_attack_resampler import (
     IntraAttackResampler,
     SHORTCUT_COLS,
@@ -30,6 +34,8 @@ from .final_ids_model import (
 )
 
 __all__ = [
+    "DatasetSplitter",
+    "split_benign_attack",
     "IntraAttackResampler",
     "TabularGenerators",
     "NetFlowPreprocessor",

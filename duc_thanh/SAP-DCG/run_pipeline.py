@@ -2,23 +2,24 @@
 """
 Master Execution Script for the 4-Round Sequential Tuning Pipeline.
 
-Implements the complete pipeline workflow defined in components.txt:
-- Round 1: Tune IntraAttackResampler (SMOTE-NC y_max) based on FinalIDSModel evaluation.
-  Advances to Round 2 when improvement < epsilon.
-- Round 2: Tune TabularGenerators (CTGAN / TVAE) based on FinalIDSModel evaluation.
-  Trains with fixed 42k gradient updates.
-  Advances to Round 3 when improvement < epsilon.
-- Round 3: Tune SyntheticSampleFilter (OOF confidence threshold & ENN n=3) based on FinalIDSModel evaluation.
-  Advances to Final Round when improvement < epsilon.
-- Final Round: Tune FinalIDSModel (Final IDS Model) on best augmented data, then report
-  final metrics on Val, Test, and Holdout sets, along with dataset distance to the validation distribution.
+Implements the complete pipeline workflow defined in components.txt and docs/fixes.txt:
+- Data Splitting & Disaggregation: Uses DatasetSplitter to disaggregate Benign and Attack flows
+  upfront, and fits the SyntheticSampleFilter (OOF 5-fold predictor & ENN index) immediately.
+- Round 1: Exhaustively tunes IntraAttackResampler (SMOTE-NC y_max in [1, 5, 10, 15, 20, 25, 30, 40])
+  based on FinalIDSModel evaluation; plots y_max tuning curve.
+- Round 2: Tunes TabularGenerators (CTGAN / TVAE) based on FinalIDSModel evaluation with fixed 42k gradient updates.
+- Round 3: Exhaustively tunes SyntheticSampleFilter (OOF threshold in [0.4, 0.5, 0.6, 0.7, 0.8] & ENN n=3)
+  based on FinalIDSModel evaluation; plots threshold tuning curve and consolidated multi-panel summary.
+- Final Round: Tunes FinalIDSModel (Two-Tier IDS Model with custom rare-boost class weighting equation)
+  on best augmented data, then reports final metrics across Val, Test, and Holdout sets, along with
+  dataset distance to the validation distribution.
 
-All optimal hyperparameters, model weights, resampled datasets, metrics JSON, and a comprehensive
+All optimal hyperparameters, model weights, resampled datasets, tuning plots, metrics JSON, and a comprehensive
 Markdown evaluation report (`evaluation_report.md`) are exported to the designated destination folder.
 
 Usage:
     python run_pipeline.py --help
-    python run_pipeline.py --generator ctgan --epsilon 0.002 --output-dir outputs/run_experiment_1
+    python run_pipeline.py --generator ctgan --output-dir outputs/run_experiment_1
 """
 
 import sys

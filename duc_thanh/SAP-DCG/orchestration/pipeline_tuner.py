@@ -42,14 +42,20 @@ for p in [curr_dir, pkg_root, comp_dir]:
 
 try:
     from components.intra_attack_resampler import resolve_paths, SHORTCUT_COLS, CATEGORICAL_FEATURES, IntraAttackResampler
-    from components.tabular_generators import TabularGenerators, CTGAN_DIMS
+    from components.tabular_generators import TabularGenerators, CTGAN_DIMS, TVAE_DIMS, TVAE_DEFAULT_PARAMS
     from components.synthetic_sample_filter import SyntheticSampleFilter
     from components.final_ids_model import FinalIDSModel, evaluate_synthetic_quality
+    from components.dataset_splitter import split_benign_attack
 except ImportError:
     from intra_attack_resampler import resolve_paths, SHORTCUT_COLS, CATEGORICAL_FEATURES, IntraAttackResampler
-    from tabular_generators import TabularGenerators, CTGAN_DIMS
+    from tabular_generators import TabularGenerators, CTGAN_DIMS, TVAE_DIMS, TVAE_DEFAULT_PARAMS
     from synthetic_sample_filter import SyntheticSampleFilter
     from final_ids_model import FinalIDSModel, evaluate_synthetic_quality
+    try:
+        from dataset_splitter import split_benign_attack
+    except ImportError:
+        def split_benign_attack(df, **kwargs):
+            return df[df["Label"] == 0].copy().reset_index(drop=True), df[df["Label"] == 1].copy().reset_index(drop=True)
 
 
 class PipelineTuner:
@@ -66,6 +72,7 @@ class PipelineTuner:
         metric_key: str = "macro_f1",
         epsilon: float = 0.002,
         final_dir: Optional[Union[str, Path]] = None,
+        output_dir: Optional[Union[str, Path]] = None,
     ):
         self.t_max = t_max
         self.random_state = random_state
@@ -79,12 +86,139 @@ class PipelineTuner:
         else:
             self.base_dir, _, self.final_dir = resolve_paths()
 
+        if output_dir is not None:
+            self.output_dir = Path(output_dir).resolve()
+        else:
+            self.output_dir = self.final_dir / "outputs"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
         # Tuning tracking states
         self.best_y_max: int = 25
         self.best_generator_params: Dict[str, Any] = {}
         self.best_filter_threshold: float = 0.6
         self.best_ids_params: Dict[str, Any] = {}
         self.tuning_history: Dict[str, Any] = {}
+
+    # ========================================================================
+    # Plotting Helpers for Tuning Curves
+    # ========================================================================
+    def _plot_tuning_curve(
+        self,
+        x_vals: List[Any],
+        y_vals: List[float],
+        best_x: Any,
+        best_y: float,
+        xlabel: str,
+        ylabel: str,
+        title: str,
+        output_filename: str,
+        output_dir: Optional[Union[str, Path]] = None,
+    ) -> Optional[Path]:
+        """
+        Generates and exports publication-ready tuning curve charts with annotations.
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as e:
+            print(f"Warning: Matplotlib plot could not be created ({e}).")
+            return None
+
+        out_d = Path(output_dir) if output_dir else self.output_dir
+        out_d.mkdir(parents=True, exist_ok=True)
+        save_path = out_d / output_filename
+
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
+        ax.plot(x_vals, y_vals, marker="o", color="#1f77b4", linewidth=2.0, markersize=7, label="Candidate Evaluation")
+
+        # Highlight best point
+        ax.scatter([best_x], [best_y], color="#d62728", s=130, zorder=5, label=f"Best: {best_x} ({best_y:.4f})")
+
+        # Annotate points
+        for x, y in zip(x_vals, y_vals):
+            ax.annotate(
+                f"{y:.4f}",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, 9),
+                ha="center",
+                fontsize=9,
+                color="#333333",
+            )
+
+        ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel(xlabel, fontsize=10, fontweight="semibold")
+        ax.set_ylabel(ylabel, fontsize=10, fontweight="semibold")
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.legend(frameon=True, loc="best")
+        plt.tight_layout()
+        plt.savefig(save_path)
+        plt.close(fig)
+
+        print(f"  [Artifact Export] Saved Tuning Plot: {save_path.name}")
+        return save_path
+
+    def plot_combined_tuning_summary(
+        self,
+        r1_history: List[Dict[str, Any]],
+        r3_history: List[Dict[str, Any]],
+        output_dir: Optional[Union[str, Path]] = None,
+    ) -> Optional[Path]:
+        """
+        Generates a consolidated two-panel chart comparing Round 1 (y_max) and Round 3 (OOF Threshold) tuning.
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as e:
+            print(f"Warning: Matplotlib plot could not be created ({e}).")
+            return None
+
+        out_d = Path(output_dir) if output_dir else self.output_dir
+        out_d.mkdir(parents=True, exist_ok=True)
+        save_path = out_d / "tuning_curves_summary.png"
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5.5), dpi=150)
+
+        # Panel 1: Round 1 (y_max)
+        if r1_history:
+            x1 = [h["y_max"] for h in r1_history]
+            y1 = [h[self.metric_key] for h in r1_history]
+            best_idx1 = int(np.argmax(y1))
+            ax1.plot(x1, y1, marker="o", color="#1f77b4", linewidth=2.0, markersize=6)
+            ax1.scatter([x1[best_idx1]], [y1[best_idx1]], color="#d62728", s=120, zorder=5, label=f"Best y_max={x1[best_idx1]} ({y1[best_idx1]:.4f})")
+            for x, y in zip(x1, y1):
+                ax1.annotate(f"{y:.4f}", (x, y), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8)
+            ax1.set_title("Round 1: SMOTE-NC $y_{\\max}$ Tuning", fontsize=11, fontweight="bold")
+            ax1.set_xlabel("Multiplication Factor $y_{\\max}$", fontsize=10)
+            ax1.set_ylabel(f"Val {self.metric_key.replace('_', ' ').title()}", fontsize=10)
+            ax1.grid(True, linestyle="--", alpha=0.6)
+            ax1.legend(loc="best")
+
+        # Panel 2: Round 3 (threshold)
+        if r3_history:
+            x2 = [h["threshold"] for h in r3_history]
+            y2 = [h[self.metric_key] for h in r3_history]
+            best_idx2 = int(np.argmax(y2))
+            ax2.plot(x2, y2, marker="s", color="#2ca02c", linewidth=2.0, markersize=6)
+            ax2.scatter([x2[best_idx2]], [y2[best_idx2]], color="#d62728", s=120, zorder=5, label=f"Best θ={x2[best_idx2]} ({y2[best_idx2]:.4f})")
+            for x, y in zip(x2, y2):
+                ax2.annotate(f"{y:.4f}", (x, y), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8)
+            ax2.set_title("Round 3: OOF Filter Threshold Tuning", fontsize=11, fontweight="bold")
+            ax2.set_xlabel("OOF Confidence Gate Threshold $\\theta_{\\text{OOF}}$", fontsize=10)
+            ax2.set_ylabel(f"Val {self.metric_key.replace('_', ' ').title()}", fontsize=10)
+            ax2.grid(True, linestyle="--", alpha=0.6)
+            ax2.legend(loc="best")
+
+        plt.suptitle("Sequential Pipeline Tuning Curves (Comp 1 & Comp 3)", fontsize=13, fontweight="bold", y=1.02)
+        plt.tight_layout()
+        plt.savefig(save_path)
+        plt.close(fig)
+
+        print(f"  [Artifact Export] Saved Combined Tuning Summary Plot: {save_path.name}")
+        return save_path
 
     # ========================================================================
     # 1. Round 1: Tune Intra-Attack Resampler (y_max)
@@ -102,6 +236,9 @@ class PipelineTuner:
         batch_size: int = 200,
         epochs: Optional[int] = None,
         multiplier: int = 10,
+        train_benign: Optional[pd.DataFrame] = None,
+        train_attacks: Optional[pd.DataFrame] = None,
+        output_dir: Optional[Union[str, Path]] = None,
     ) -> Dict[str, Any]:
         """
         Tunes the SMOTE-NC multiplication factor y_max in Component 1.
@@ -112,13 +249,15 @@ class PipelineTuner:
           3. Generate candidate pool (multiplier * n_syn).
           4. Run candidate flows through filter and physical constraints / reverse transform.
           5. Evaluate downstream on val_df using FinalIDSModel (Macro F1).
-        Stops early if consecutive improvement < epsilon.
+        Runs all candidate cases without early stopping, then plots the tuning curve.
         """
         if candidate_ymax is None:
             candidate_ymax = [1, 5, 10, 15, 20, 25, 30, 40]
 
-        train_benign = train_df[train_df["Label"] == 0].copy().reset_index(drop=True)
-        real_train_attacks = train_df[train_df["Label"] == 1].copy().reset_index(drop=True)
+        if train_benign is None or train_attacks is None:
+            train_benign, real_train_attacks = split_benign_attack(train_df, verbose=False)
+        else:
+            real_train_attacks = train_attacks
 
         print("=" * 80)
         print(">>> [Round 1] Tuning Component 1 (y_max) via Generator-in-the-Loop Evaluation")
@@ -126,7 +265,7 @@ class PipelineTuner:
         print(f"Candidates:       {candidate_ymax}")
         print(f"Ceiling t_max:     {self.t_max:,}")
         print(f"Generator Active:  {generator is not None}")
-        print(f"Stopping eps:     {self.epsilon} (improvement < epsilon -> proceed to next round)")
+        print(f"Stopping Rule:    None (Evaluating all {len(candidate_ymax)} candidates)")
         print(f"Target Metric:    {self.metric_key}\n")
 
         history = []
@@ -214,7 +353,7 @@ class PipelineTuner:
                 "history": [{"best_y": best_y, "best_score": best_score}],
             }
 
-        # Grid-search over candidates with epsilon stopping criteria
+        # Grid-search over all candidates (no early stopping)
         for idx, y_val in enumerate(candidate_ymax, 1):
             t_start = time.time()
             print(f"--- [Comp1 Tuning {idx}/{len(candidate_ymax)}] Testing y_max = {y_val} ---")
@@ -242,17 +381,25 @@ class PipelineTuner:
                 best_candidate_pool = cand_pool
                 best_clean_syn = clean_syn
 
-            # Convergence stopping condition (improvement < epsilon)
-            if prev_score > 0 and (score - prev_score) < self.epsilon and idx >= 3:
-                print(f"\n[Stopping Condition Reached] Improvement ({score - prev_score:.5f}) < epsilon ({self.epsilon}).")
-                print("Proceeding to second round...")
-                break
-
             prev_score = score
 
         self.best_y_max = best_y
         print("=" * 80)
         print(f"Comp1 Tuning Finished: Best y_max = {self.best_y_max} ({self.metric_key}: {best_score:.4f})")
+        print("=" * 80)
+
+        # Generate Round 1 tuning curve plot
+        plot_path = self._plot_tuning_curve(
+            x_vals=[h["y_max"] for h in history],
+            y_vals=[h[self.metric_key] for h in history],
+            best_x=self.best_y_max,
+            best_y=best_score,
+            xlabel="SMOTE-NC Multiplication Factor ($y_{\\max}$)",
+            ylabel=f"Validation {self.metric_key.replace('_', ' ').title()}",
+            title=f"Round 1: IntraAttackResampler $y_{{\\max}}$ Tuning Curve (Best = {self.best_y_max})",
+            output_filename="round1_ymax_tuning.png",
+            output_dir=output_dir,
+        )
         print("=" * 80 + "\n")
 
         return {
@@ -262,6 +409,7 @@ class PipelineTuner:
             "best_candidate_pool": best_candidate_pool,
             "best_clean_syn": best_clean_syn,
             "history": history,
+            "tuning_plot": str(plot_path) if plot_path else None,
         }
 
     # ========================================================================
@@ -324,23 +472,29 @@ class PipelineTuner:
                     "discriminator_steps": disc_steps,
                     "log_frequency": log_freq,
                 }
-            else:  # tvae
-                emb_dim = trial.suggest_categorical("embedding_dim", [64, 128])
-                l2scale = trial.suggest_float("l2scale", 1e-6, 1e-4, log=True)
-                b_size = trial.suggest_categorical("batch_size", [100, 500])
+            else:  # tvae (Do Minh Thanh's Optuna space from tvae_final_perclass_v2.ipynb)
+                epochs_val = trial.suggest_categorical("epochs", [50, 100, 200, 300])
+                b_size = trial.suggest_categorical("batch_size", [100, 250, 500, 1000])
+                emb_dim = trial.suggest_categorical("embedding_dim", [64, 128, 256])
+                dims_val = trial.suggest_categorical("dims", list(TVAE_DIMS.keys()))
+                l2scale = trial.suggest_float("l2scale", 1e-6, 1e-3, log=True)
+                loss_factor = trial.suggest_categorical("loss_factor", [1, 2, 3, 5])
                 pac_val = 1
                 kwargs = {
+                    "epochs": epochs_val,
                     "embedding_dim": emb_dim,
+                    "dims": dims_val,
                     "l2scale": l2scale,
+                    "loss_factor": loss_factor,
                 }
 
-            # Train generator with candidate hyperparameters (using fixed updates)
+            # Train generator with candidate hyperparameters
             generator.train(
                 train_attacks=train_attacks,
                 syn_deficit=syn_deficit,
                 batch_size=b_size,
                 pac=pac_val,
-                unified_generator=True,
+                unified_generator=(generator.model_type == "ctgan"),
                 verbose=False,
                 **kwargs,
             )
@@ -380,6 +534,7 @@ class PipelineTuner:
                     "models": copy.deepcopy(generator.models),
                     "unified_model": copy.deepcopy(generator.unified_model),
                     "preprocessor": copy.deepcopy(generator.preprocessor),
+                    "tvae_preprocessor": copy.deepcopy(generator.tvae_preprocessor),
                 }
                 generator.save_weights("best_tuned_generator_weights.pt")
 
@@ -387,6 +542,8 @@ class PipelineTuner:
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction="maximize")
+        if generator.model_type == "tvae":
+            study.enqueue_trial(TVAE_DEFAULT_PARAMS)
         study.optimize(objective, n_trials=n_trials, timeout=timeout)
 
         print("\n" + "=" * 80)
@@ -399,6 +556,7 @@ class PipelineTuner:
             generator.models = best_trial_models["models"]
             generator.unified_model = best_trial_models["unified_model"]
             generator.preprocessor = best_trial_models["preprocessor"]
+            generator.tvae_preprocessor = best_trial_models["tvae_preprocessor"]
 
         return {
             "best_params": study.best_params,
@@ -419,11 +577,12 @@ class PipelineTuner:
         ids_model: FinalIDSModel,
         syn_deficit: Dict[str, int],
         candidate_thresholds: Optional[List[float]] = None,
+        output_dir: Optional[Union[str, Path]] = None,
     ) -> Dict[str, Any]:
         """
         Tunes the OOF confidence gate threshold in Component 3.
         Evaluates each threshold via the IDS model on the validation set.
-        Stops early if consecutive improvement < epsilon.
+        Runs all candidate thresholds without early stopping, then plots the tuning curve.
         """
         if candidate_thresholds is None:
             candidate_thresholds = [0.4, 0.5, 0.6, 0.7, 0.8]
@@ -432,7 +591,7 @@ class PipelineTuner:
         print(">>> [Round 3] Tuning Component 3 (OOF Confidence Threshold) Based on IDS Model")
         print("=" * 80)
         print(f"Candidate Thresholds: {candidate_thresholds}")
-        print(f"Stopping eps:         {self.epsilon}")
+        print(f"Stopping Rule:        None (Evaluating all {len(candidate_thresholds)} candidates)")
 
         best_score = -1.0
         best_thresh = candidate_thresholds[0]
@@ -488,17 +647,25 @@ class PipelineTuner:
                 best_thresh = thresh
                 best_kept_df = df_syn_clean
 
-            # Stopping condition: improvement < epsilon
-            if prev_score > 0 and (score - prev_score) < self.epsilon and idx >= 2:
-                print(f"\n[Stopping Condition Reached] Improvement ({score - prev_score:.5f}) < epsilon ({self.epsilon}).")
-                print("Proceeding to final round...")
-                break
-
             prev_score = score
 
         self.best_filter_threshold = best_thresh
         print("\n" + "=" * 80)
         print(f"Comp3 Tuning Finished: Best Threshold = {self.best_filter_threshold} ({self.metric_key}: {best_score:.4f})")
+        print("=" * 80)
+
+        # Generate Round 3 tuning curve plot
+        plot_path = self._plot_tuning_curve(
+            x_vals=[h["threshold"] for h in history],
+            y_vals=[h[self.metric_key] for h in history],
+            best_x=self.best_filter_threshold,
+            best_y=best_score,
+            xlabel="OOF Confidence Gate Threshold ($\theta_{\\text{OOF}}$)",
+            ylabel=f"Validation {self.metric_key.replace('_', ' ').title()}",
+            title=f"Round 3: SyntheticSampleFilter Threshold Tuning Curve (Best = {self.best_filter_threshold})",
+            output_filename="round3_threshold_tuning.png",
+            output_dir=output_dir,
+        )
         print("=" * 80 + "\n")
 
         return {
@@ -506,6 +673,7 @@ class PipelineTuner:
             "best_score": best_score,
             "best_kept_df": best_kept_df,
             "history": history,
+            "tuning_plot": str(plot_path) if plot_path else None,
         }
 
     # ========================================================================
@@ -647,6 +815,14 @@ class PipelineTuner:
             enn_neighbors=3,
         )
 
+        # Disaggregate benign and attack flows upfront
+        train_benign, real_train_attacks = split_benign_attack(train_df, verbose=True)
+
+        # Pre-fit OOF predictor and ENN index on real training attack flows
+        print(">>> [Pre-Training] Fitting OOF 5-Fold Predictor & ENN on Real Attack Training Set...")
+        sample_filter.fit_oof_predictor(real_train_attacks)
+        sample_filter.fit_enn(real_train_attacks)
+
         round_history = {}
 
         # --------------------------------------------------------------------
@@ -661,6 +837,11 @@ class PipelineTuner:
             val_df=val_df,
             ids_model=ids_model,
             candidate_ymax=candidate_ymax,
+            generator=generators,
+            sample_filter=sample_filter,
+            train_benign=train_benign,
+            train_attacks=real_train_attacks,
+            output_dir=self.output_dir,
         )
         best_train_resampled = r1_res["best_results"]["df_train_resampled"]
         best_syn_deficit = r1_res["best_results"]["syn_deficit"]
@@ -672,6 +853,7 @@ class PipelineTuner:
             "best_score": r1_res["best_score"],
             "metric": self.metric_key,
             "details": r1_res["history"],
+            "tuning_plot": r1_res.get("tuning_plot"),
         }
 
         # --------------------------------------------------------------------
@@ -680,9 +862,6 @@ class PipelineTuner:
         print("\n" + "#" * 85)
         print(f"PIPELINE ROUND 2: TUNING COMP2 ({generator_type.upper()}) BASED ON COMP4 EVALUATION")
         print("#" * 85)
-
-        train_benign = train_df[train_df["Label"] == 0].copy().reset_index(drop=True)
-        real_train_attacks = train_df[train_df["Label"] == 1].copy().reset_index(drop=True)
 
         # Pass the SMOTE-NC pre-balanced attack dataset from Round 1 to CTGAN
         if best_train_resampled is not None and not best_train_resampled.empty:
@@ -741,16 +920,17 @@ class PipelineTuner:
 
         r3_res = self.tune_filter_threshold(
             synthetic_pool=df_candidate_pool,
-            real_train_attacks=train_attacks,
+            real_train_attacks=real_train_attacks,
             train_benign=train_benign,
             val_df=val_df,
             sample_filter=sample_filter,
             ids_model=ids_model,
             syn_deficit=best_syn_deficit,
             candidate_thresholds=candidate_thresholds,
+            output_dir=self.output_dir,
         )
         best_clean_syn = r3_res["best_kept_df"]
-        best_train_resampled = pd.concat([train_benign, train_attacks, best_clean_syn], ignore_index=True)
+        best_train_resampled = pd.concat([train_benign, real_train_attacks, best_clean_syn], ignore_index=True)
 
         round_history["round3"] = {
             "component": "comp3 (SyntheticSampleFilter)",
@@ -759,7 +939,15 @@ class PipelineTuner:
             "kept_synthetic_samples": len(best_clean_syn),
             "metric": self.metric_key,
             "details": r3_res["history"],
+            "tuning_plot": r3_res.get("tuning_plot"),
         }
+
+        # Export consolidated multi-panel tuning plot
+        self.plot_combined_tuning_summary(
+            r1_history=r1_res.get("history", []),
+            r3_history=r3_res.get("history", []),
+            output_dir=self.output_dir,
+        )
 
         # --------------------------------------------------------------------
         # FINAL ROUND: Tune Comp4 & Comprehensive Reporting

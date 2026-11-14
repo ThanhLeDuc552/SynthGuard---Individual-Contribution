@@ -228,6 +228,8 @@ class FinalIDSModel:
         subsample: float = 0.8,
         colsample_bytree: float = 0.8,
         weight_power: float = 0.5,
+        weight_method: Optional[str] = "none",
+        rare_boost_alpha: float = 0.6,
         max_fpr: float = 0.01,
         anomaly_fpr: float = 0.005,
         min_confidence: float = 0.4,
@@ -250,6 +252,8 @@ class FinalIDSModel:
         }
         self.device = device
         self.weight_power = weight_power
+        self.weight_method = weight_method.lower() if weight_method else "none"
+        self.rare_boost_alpha = rare_boost_alpha
         self.max_fpr = max_fpr
         self.anomaly_fpr = anomaly_fpr
         self.min_confidence = min_confidence
@@ -274,6 +278,67 @@ class FinalIDSModel:
         self.is_trained: bool = False
         self.last_val_metrics: Dict[str, Any] = {}
         self.last_test_metrics: Dict[str, Any] = {}
+
+    def compute_class_weights(
+        self,
+        y: Union[np.ndarray, pd.Series, List[Any]],
+        method: Optional[str] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Computes sample weights according to the selected weighting method.
+        Supports:
+          - "none" / "disabled" / None:
+              No sample weighting applied (returns None; XGBoost trains unweighted by default).
+          - "balanced_power":
+              Classical balanced power weighting (compute_sample_weight("balanced", y) ** weight_power).
+          - "custom_rare_boost" / "custom_equation":
+              Optional custom equation amplifying rare classes below median count.
+          - "linear_regression" / "linear":
+              Optional linear rarity decay ranking rarest classes with highest emphasis.
+        """
+        raw_m = method if method is not None else getattr(self, "weight_method", "none")
+        if raw_m is None:
+            return None
+        m = str(raw_m).lower().strip()
+        if m in ["none", "disabled", "off", "false"]:
+            return None
+
+        y_arr = np.asarray(y)
+        unique_classes, counts = np.unique(y_arr, return_counts=True)
+        n_samples = len(y_arr)
+        n_classes = len(unique_classes)
+        count_dict = dict(zip(unique_classes, counts))
+
+        base_weights = compute_sample_weight("balanced", y_arr)
+
+        if m in ["custom_rare_boost", "custom_equation"]:
+            med_count = float(np.median(counts))
+            sample_weights = np.empty(n_samples, dtype=np.float32)
+            alpha = getattr(self, "rare_boost_alpha", 0.6)
+            for cls_val, cnt in count_dict.items():
+                mask = (y_arr == cls_val)
+                rarity_ratio = med_count / max(1, cnt)
+                rare_multiplier = 1.0 + alpha * float(np.log1p(rarity_ratio))
+                sample_weights[mask] = (base_weights[mask] ** self.weight_power) * rare_multiplier
+            sample_weights = sample_weights / np.mean(sample_weights)
+            return sample_weights
+
+        elif m in ["linear_regression", "linear"]:
+            sorted_classes = sorted(unique_classes, key=lambda c: count_dict[c])
+            ranks = {cls: idx + 1 for idx, cls in enumerate(sorted_classes)}
+            sample_weights = np.empty(n_samples, dtype=np.float32)
+            for cls_val in unique_classes:
+                mask = (y_arr == cls_val)
+                rank = ranks[cls_val]
+                linear_mult = 1.0 + ((n_classes - rank) / max(1, n_classes))
+                sample_weights[mask] = (base_weights[mask] ** self.weight_power) * linear_mult
+            sample_weights = sample_weights / np.mean(sample_weights)
+            return sample_weights
+
+        elif m in ["balanced", "balanced_power"]:
+            return base_weights ** self.weight_power
+
+        return None
 
     def _extract_labels(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Extracts binary y (0=benign, 1=attack) and attack names."""
@@ -335,7 +400,7 @@ class FinalIDSModel:
             self.anomaly_detector.fit(X_ben_tr, X_ben_va, fpr=self.anomaly_fpr)
 
             # Fit Supervised Tier 1 XGBoost
-            w_t1 = compute_sample_weight("balanced", y_tr) ** self.weight_power
+            w_t1 = self.compute_class_weights(y_tr)
             self.tier1_model = make_xgb(
                 2,
                 seed=self.random_state,
@@ -359,7 +424,7 @@ class FinalIDSModel:
             self.pre2.fit(df_att)
             self.attack_classes_ = np.unique(att_names)
             ci = np.searchsorted(self.attack_classes_, att_names)
-            w_t2 = compute_sample_weight("balanced", ci) ** self.weight_power
+            w_t2 = self.compute_class_weights(ci)
 
             X_tr2 = self.pre2.transform(df_att)
             self.tier2_model = make_xgb(
@@ -380,7 +445,7 @@ class FinalIDSModel:
             self.label_encoder.fit(attack_names_tr)
             y_enc = self.label_encoder.transform(attack_names_tr)
             n_classes = len(self.label_encoder.classes_)
-            w = compute_sample_weight("balanced", y_enc) ** self.weight_power
+            w = self.compute_class_weights(y_enc)
 
             self.standalone_model = make_xgb(
                 n_classes,
@@ -601,6 +666,8 @@ class FinalIDSModel:
             "use_two_tier": getattr(self, "use_two_tier", True),
             "params": getattr(self, "params", {}),
             "weight_power": getattr(self, "weight_power", 0.5),
+            "weight_method": getattr(self, "weight_method", "none"),
+            "rare_boost_alpha": getattr(self, "rare_boost_alpha", 0.6),
             "min_confidence": getattr(self, "min_confidence", 0.4),
             "max_fpr": getattr(self, "max_fpr", 0.01),
             "anomaly_fpr": getattr(self, "anomaly_fpr", 0.005),

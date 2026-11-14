@@ -125,12 +125,14 @@ class IntraAttackResampler:
         y_max: int = 25,
         random_state: int = 42,
         scaler_type: str = "minmax",
+        weight_equation: str = "standard",
         final_dir: Optional[Union[str, Path]] = None,
     ):
         self.t_max = t_max
         self.y_max = y_max
         self.random_state = random_state
         self.scaler_type = scaler_type.lower()
+        self.weight_equation = weight_equation.lower()
 
         # Initialize scaler
         if self.scaler_type == "standard":
@@ -201,8 +203,17 @@ class IntraAttackResampler:
         syn_deficit = {}
         summary_rows = []
 
+        med_c = float(np.median(list(attack_counts.values()))) if attack_counts else 1.0
+
         for cls, n_c in attack_counts.items():
-            scaled_c = int(self.y_max * n_c)
+            if self.weight_equation in ["custom_rare_boost", "custom_equation"] and n_c < med_c:
+                # Custom rare boost equation: scales y_max inversely with rarity ratio
+                boost = 1.0 + 0.3 * float(np.log1p(med_c / max(1, n_c)))
+                effective_ymax = self.y_max * boost
+            else:
+                effective_ymax = float(self.y_max)
+
+            scaled_c = int(effective_ymax * n_c)
             t_c = max(n_c, min(self.t_max, scaled_c))
             n_syn = max(0, t_c - n_c)
 
@@ -213,7 +224,7 @@ class IntraAttackResampler:
             summary_rows.append({
                 "Attack Class": cls,
                 "Original (n_c)": n_c,
-                "y_max * n_c": scaled_c,
+                "Effective y_max": f"{effective_ymax:.2f}",
                 "Target (t_c)": t_c,
                 "Synthetic Deficit (n_syn)": n_syn,
                 "Multiplier": f"{multiplier:.2f}x",

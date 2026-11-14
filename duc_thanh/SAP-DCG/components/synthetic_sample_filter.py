@@ -313,15 +313,36 @@ class SyntheticSampleFilter:
         t0 = time.time()
         thresh = oof_threshold if oof_threshold is not None else self.default_oof_threshold
 
-        if synthetic_df.empty:
-            return {"kept_df": pd.DataFrame(), "rejected_df": pd.DataFrame(), "diagnostics": {}}
-
         print("=" * 80)
         print(">>> [SampleFilter] Executing Synthetic Sample Filtering Pipeline")
         print("=" * 80)
         print(f"Input Candidate Pool:  {len(synthetic_df):,} flows")
         print(f"OOF Confidence Thresh: {thresh}")
         print(f"ENN Boundary Check:    {'Enabled (k=3)' if run_enn else 'Disabled'}")
+
+        # Ensure OOF predictor and ENN are fitted if real_train_df provided
+        if not self.oof_models and real_train_df is not None:
+            self.fit_oof_predictor(real_train_df)
+        if run_enn and self.enn_engine is None and real_train_df is not None:
+            self.fit_enn(real_train_df)
+
+        if synthetic_df.empty:
+            print("    Filtering Note: Input synthetic pool is empty (e.g. y_max=1 with zero deficit).")
+            print("    Filtering Results: 0 input -> 0 kept synthetic flows.")
+            print("=" * 80 + "\n")
+            return {
+                "kept_df": pd.DataFrame(),
+                "rejected_df": pd.DataFrame(),
+                "diagnostics": {
+                    "input_count": 0,
+                    "oof_pass_count": 0,
+                    "enn_pass_count": 0,
+                    "both_pass_count": 0,
+                    "final_kept_count": 0,
+                    "threshold_used": thresh,
+                    "elapsed_sec": 0.0,
+                },
+            }
 
         # 1. Reverse transform & physical rules
         df_rules = self.apply_reverse_transform_and_rules(

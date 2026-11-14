@@ -1,0 +1,18 @@
+CURRENT SETTING:
+Target Ceiling:  t_max = 10,000
+Generator Type:  CTGAN (42,000 gradient updates)
+Candidates y_max:       [1, 5, 10, 15, 20, 25, 30, 40]
+Candidate Thresholds: [0.4, 0.5, 0.6, 0.7, 0.8]
+
+PREVIOUS ISSUES:
+- no filtering output in the first run (caused by empty candidate pool at y_max=1 with zero deficit returning silently)
+- flawed early stopping mechanism (broke out after 2-3 trials instead of scanning full candidate range)
+
+IMPLEMENTED ADJUSTMENTS:
+- Independent splitting module created in `components/dataset_splitter.py` (simple single-seed partitioning + `split_benign_attack`).
+- Main orchestrator disaggregates Benign and Attack flows upfront before Round 1.
+- OOF (5-fold XGBoost) and ENN (k=3) are fitted immediately on `train_attacks` upfront in the orchestrator.
+- Dropped all early stopping mechanisms in Round 1 and Round 3: all candidates are run exhaustively.
+- Added automated tuning curve plotting via matplotlib (`round1_ymax_tuning.png`, `round3_threshold_tuning.png`, `tuning_curves_summary.png`).
+- Fixed filtering output for empty candidate pools (`y_max=1` / zero deficit) to log diagnostics explicitly.
+- Weighting mechanism: Made optional and disabled by default (`weight_method="none"` in `FinalIDSModel`, `weight_equation="standard"` in `IntraAttackResampler`).

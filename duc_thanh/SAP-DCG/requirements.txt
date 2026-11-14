@@ -1,5 +1,6 @@
 # Core Machine Learning & Generative Models
 ctgan>=0.10.0
+sdv>=1.0.0
 xgboost>=2.0.0
 optuna>=3.6.0
 imbalanced-learn>=0.12.0

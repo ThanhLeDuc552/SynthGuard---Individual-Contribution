@@ -18,13 +18,14 @@ flowchart TD
     end
 
     subgraph S2["Phase 2: Multi-Round Sequential Tuning Pipeline"]
-        DEV --> R1["Round 1: IntraAttackResampler (SMOTE-NC)\n• Tune y_max ∈ [5, 10, 15, 20, 25]\n• Compute Deficit Quota n_syn\n• Evaluate on FinalIDSModel (val Macro F1)\n• Generates pre-balanced smote-10k dataset"]
+        DEV --> DISAGG["Upfront Partition Disaggregation\n• Split Train into Benign vs Attack flows\n• Pre-fit OOF 5-Fold XGBoost & ENN (k=3) upfront"]
+        DISAGG --> R1["Round 1: IntraAttackResampler (SMOTE-NC)\n• Exhaustive evaluation y_max ∈ [1, 5, 10, 15, 20, 25, 30, 40]\n• Compute Deficit Quota n_syn\n• Evaluate on FinalIDSModel (val Macro F1)\n• Plot y_max tuning curve (round1_ymax_tuning.png)"]
         
-        R1 -->|If Δ < ε| R2["Round 2: TabularGenerators (CTGAN)\n• Train CTGAN on SMOTE-NC pre-balanced dataset\n• Fixed 42,000 gradient updates\n• Draw 10x n_syn candidate synthetic flows\n• Evaluate on FinalIDSModel"]
+        R1 --> R2["Round 2: TabularGenerators (CTGAN)\n• Train CTGAN on SMOTE-NC pre-balanced dataset\n• Fixed 42,000 gradient updates\n• Draw 10x n_syn candidate synthetic flows\n• Evaluate on FinalIDSModel"]
         
-        R2 -->|If Δ < ε| R3["Round 3: SyntheticSampleFilter\n• NetFlow Domain & Protocol Invariant Rules\n• 5-Fold XGBoost OOF Confidence Gate\n• Edited Nearest Neighbors (ENN, k=3)\n• Tune OOF Threshold θ ∈ [0.4, 0.5, 0.6]\n• Retain top n_syn clean synthetic flows"]
+        R2 --> R3["Round 3: SyntheticSampleFilter\n• NetFlow Domain & Protocol Invariant Rules\n• 5-Fold XGBoost OOF Confidence Gate\n• Edited Nearest Neighbors (ENN, k=3)\n• Exhaustive evaluation θ ∈ [0.4, 0.5, 0.6, 0.7, 0.8]\n• Plot threshold & summary tuning curves"]
         
-        R3 -->|If Δ < ε| R4["Final Round: FinalIDSModel Optimization\n• Train on Augmented Data (Real + Clean Synthetic)\n• Optimize Two-Tier Hyperparameters (Optuna)\n• Tier 1: Binary Supervised + IsolationForest Anomaly\n• Tier 2: AttackTyper Multiclass Classifier"]
+        R3 --> R4["Final Round: FinalIDSModel Optimization\n• Train on Augmented Data (Real + Clean Synthetic)\n• Optimize Two-Tier Hyperparameters (Optuna)\n• Tier 1: Binary Supervised + IsolationForest Anomaly\n• Tier 2: AttackTyper Multiclass Classifier\n• Unweighted training by default (weight_method='none')"]
     end
 
     subgraph S3["Phase 3: Multi-Partition Evaluation & Artifact Export"]
@@ -85,7 +86,7 @@ flowchart TD
 - **Role:** Downstream intrusion detection defense, tuning objective function, and multi-pillar quality evaluator.
 - **Integrated Architecture (Tuan's ML-IDS Methodology):**
   - **Tier 1 (Benign vs Attack Detector):** Supervised XGBoost classifier combined with an IsolationForest and signed-log robust-Z anomaly detector fitted solely on Benign flows. Calibrated against a target false-alarm ceiling (`max_fpr = 0.01`).
-  - **Tier 2 (Multiclass AttackTyper):** Multi-class XGBoost classifier trained on attack flows with square-root balanced class weighting ($w = \text{balanced}^{0.5}$) and confidence thresholding (uncertain predictions categorized as `"Unknown"`).
+  - **Tier 2 (Multiclass AttackTyper):** Multi-class XGBoost classifier trained on attack flows with optional class weighting (`weight_method="none"` unweighted by default) and confidence thresholding (uncertain predictions categorized as `"Unknown"`).
 - **5-Pillar Synthetic Data Quality Evaluation (`evaluate_synthetic_quality`):**
   - **Coverage:** Verified representation across classes.
   - **Validity:** Measurement of invalid rows, negative cells, and fractional counts (Target = $0.00\%$).
@@ -101,10 +102,10 @@ The tuning progression is orchestrated by `SequentialTuningPipeline` and `Pipeli
 
 | Round | Focus Component | Tuned Hyperparameters | Objective / Convergence Criterion |
 | :---: | :--- | :--- | :--- |
-| **Round 1** | Component 1 (`IntraAttackResampler`) | $y_{\max} \in [5, 10, 15, 20, 25, 30]$ | **Tunes the Generator via Downstream Evaluation:** For each candidate $y_{\max}$, resamples train attacks via SMOTE-NC, trains CTGAN with fixed gradient updates, draws $10 \times n_{\text{syn}}$ candidate flows, applies physical checks and OOF filtering, and evaluates validation Macro F1 on `FinalIDSModel`. Computes optimal $n_{\text{syn}}$ quota and baseline score $r_1$. Advances to Round 2 if $\Delta < \epsilon$. |
-| **Round 2** | Component 2 (`TabularGenerators`) | Generator Architecture (`ctgan` / `tvae`), `embedding_dim`, `generator_dim`, `discriminator_dim`, `pac`, learning rate, batch size, epochs under 42k steps | Fine-tunes deep generative network structure and training dynamics on the optimal Round 1 pre-balanced attack dataset. Generates $10 \times n_{\text{syn}}$ candidate flows and evaluates on `FinalIDSModel`. Advances to Round 3 if $\Delta < \epsilon$. |
-| **Round 3** | Component 3 (`SyntheticSampleFilter`) | OOF confidence gate threshold $\theta_{\text{OOF}} \in [0.4, 0.5, 0.6, 0.7, 0.8]$, ENN neighbor count $k \in \{3, 5\}$ | Filters candidate pool via domain rules + OOF gate + ENN. Balances synthetic precision against manifold boundary coverage. Retains clean synthetic flows. Evaluates on `FinalIDSModel`. Advances if $\Delta < \epsilon$. |
-| **Final Round** | Component 4 (`FinalIDSModel`) | `max_depth`, `learning_rate`, `subsample`, `colsample_bytree`, `weight_power`, `min_confidence`, `max_fpr` | Optimizes Two-Tier IDS on final augmented data (`Real Train + Clean Synthetic`). Evaluates on Validation, Test, and pristine Holdout sets. |
+| **Round 1** | Component 1 (`IntraAttackResampler`) | $y_{\max} \in [1, 5, 10, 15, 20, 25, 30, 40]$ | **Tunes Generator via Downstream Evaluation:** For each candidate $y_{\max}$, resamples train attacks via SMOTE-NC, trains CTGAN with fixed gradient updates, draws $10 \times n_{\text{syn}}$ candidate flows, applies physical checks and OOF filtering, and evaluates validation Macro F1 on `FinalIDSModel`. Computes optimal $n_{\text{syn}}$ quota. Evaluates all candidates exhaustively (no early stopping) and generates the $y_{\max}$ tuning curve plot (`round1_ymax_tuning.png`). |
+| **Round 2** | Component 2 (`TabularGenerators`) | Generator Architecture (`ctgan` / `tvae`), `embedding_dim`, `generator_dim`, `discriminator_dim`, `pac`, learning rate, batch size, epochs under 42k steps | Fine-tunes deep generative network structure and training dynamics on the optimal Round 1 pre-balanced attack dataset. Generates $10 \times n_{\text{syn}}$ candidate flows and evaluates on `FinalIDSModel`. Advances unconditionally to Round 3. |
+| **Round 3** | Component 3 (`SyntheticSampleFilter`) | OOF confidence gate threshold $\theta_{\text{OOF}} \in [0.4, 0.5, 0.6, 0.7, 0.8]$, ENN neighbor count $k=3$ | Filters candidate pool via domain rules + OOF gate + ENN (pre-fitted upfront on real attacks). Evaluates all threshold candidates exhaustively (no early stopping). Generates threshold tuning curve (`round3_threshold_tuning.png`) and consolidated summary (`tuning_curves_summary.png`). |
+| **Final Round** | Component 4 (`FinalIDSModel`) | `n_estimators`, `max_depth`, `learning_rate`, `subsample`, `colsample_bytree`, `min_confidence`, `max_fpr` | Optimizes Two-Tier IDS on final augmented data (`Real Train + Clean Synthetic`). Trains unweighted by default (`weight_method='none'`). Evaluates on Validation, Test, and pristine Holdout sets. |
 
 ---
 
@@ -179,7 +180,7 @@ flowchart LR
 
 | Hyperparameter | Search / Candidate Space | Purpose & Technical Mechanism |
 | :--- | :--- | :--- |
-| **`weight_power`** | $[0.0, 0.25, 0.5, 0.75, 1.0]$ | **Purposes:** Controls class imbalance compensation in the Tier-2 multiclass loss function. Sample weights are computed as $w_c = (N_{\text{total}} / N_c)^{\text{weight\_power}}$. Setting `weight_power = 0.5` implements square-root class balancing, preventing extreme minority classes from dominating tree split gradients while still boosting their detection recall. |
+| **`weight_method`** / **`weight_power`** | `weight_method`: `none` (default), `balanced_power`, `custom_rare_boost`, `linear_regression`<br>`weight_power`: $[0.0, 0.25, 0.5, 0.75, 1.0]$ | **Purposes:** Optional class imbalance compensation in the Tier-2 multiclass loss function. Disabled by default (`weight_method="none"`, `sample_weight=None`). When enabled with `balanced_power`, weights scale as $w_c = (N_{\text{total}} / N_c)^{\text{weight\_power}}$. Setting `weight_power = 0.5` implements square-root class balancing. |
 | **`max_fpr`** | $[0.005, 0.01, 0.02, 0.05]$ | **Purposes:** False Alarm Rate ceiling for Tier-1 benign traffic defense. The threshold for the Tier-1 binary classifier and anomaly detector is calibrated against validation benign traffic such that the false positive rate never exceeds `max_fpr` (critical in enterprise networks to prevent alert fatigue). |
 | **`min_confidence`** | $[0.3, 0.4, 0.5, 0.6]$ | **Purposes:** Threshold for Tier-2 multiclass classification. If the top predicted attack class probability is below `min_confidence`, the flow is labeled as `"Unknown Attack"` for SOC analyst inspection rather than risking a confident misclassification. |
 | **`max_depth`** | $[4, 6, 8, 10]$ | **Purposes:** Controls tree depth in XGBoost. Shallow trees prevent memorization of noise in sparse minority classes, while deeper trees capture complex multi-feature intrusion patterns. |
@@ -216,7 +217,10 @@ When the pipeline completes, the destination folder (`--output-dir`) contains:
 
 | Filename | Format | Description |
 | :--- | :--- | :--- |
-| `evaluation_report.md` | Markdown | Comprehensive report with side-by-side overall benchmarks, detailed per-class metrics, confusion matrices, and 5-pillar quality diagnostics. |
+| `evaluation_report.md` | Markdown | Comprehensive report with side-by-side overall benchmarks, detailed per-class metrics, confusion matrices, 5-pillar quality diagnostics, candidate evaluation tables, and embedded tuning plots. |
+| `round1_ymax_tuning.png` | PNG Plot | Tuning curve across SMOTE-NC multiplication factors $y_{\max} \in [1, 5, 10, 15, 20, 25, 30, 40]$. |
+| `round3_threshold_tuning.png` | PNG Plot | Tuning curve across OOF filter confidence thresholds $\theta_{\text{OOF}} \in [0.4, 0.5, 0.6, 0.7, 0.8]$. |
+| `tuning_curves_summary.png` | PNG Plot | Consolidated two-panel tuning summary comparing Round 1 and Round 3 optimization. |
 | `best_params.json` | JSON | Optimal configuration and parameters across all four components. |
 | `pipeline_tuning_summary.json` | JSON | Complete structured numerical metrics for programmatic analysis. |
 | `round2_best_weights.pt` | PyTorch | Serialized weights and preprocessor state for the trained CTGAN model. |

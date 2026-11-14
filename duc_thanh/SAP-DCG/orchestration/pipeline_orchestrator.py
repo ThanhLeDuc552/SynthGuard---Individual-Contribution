@@ -45,6 +45,7 @@ try:
     from components.tabular_generators import TabularGenerators
     from components.synthetic_sample_filter import SyntheticSampleFilter
     from components.final_ids_model import FinalIDSModel
+    from components.dataset_splitter import split_benign_attack, DatasetSplitter
     from orchestration.pipeline_tuner import PipelineTuner
 except ImportError:
     try:
@@ -55,6 +56,11 @@ except ImportError:
     from tabular_generators import TabularGenerators
     from synthetic_sample_filter import SyntheticSampleFilter
     from final_ids_model import FinalIDSModel
+    try:
+        from dataset_splitter import split_benign_attack, DatasetSplitter
+    except ImportError:
+        def split_benign_attack(df, **kwargs):
+            return df[df["Label"] == 0].copy().reset_index(drop=True), df[df["Label"] == 1].copy().reset_index(drop=True)
 
 
 class SequentialTuningPipeline:
@@ -102,6 +108,7 @@ class SequentialTuningPipeline:
             metric_key=self.metric_key,
             epsilon=self.epsilon,
             final_dir=self.final_dir,
+            output_dir=self.output_dir,
         )
         self.resampler = IntraAttackResampler(
             t_max=self.t_max,
@@ -134,6 +141,8 @@ class SequentialTuningPipeline:
         self.best_synthetic_flows: Optional[pd.DataFrame] = None
         self.best_clean_syn: Optional[pd.DataFrame] = None
         self.best_params_payload: Dict[str, Any] = {}
+        self.train_benign: Optional[pd.DataFrame] = None
+        self.train_attacks: Optional[pd.DataFrame] = None
 
     # ------------------------------------------------------------------------
     # Round 1: Tune Comp1 Only (y_max) Based on Comp4 Evaluation
@@ -171,6 +180,9 @@ class SequentialTuningPipeline:
             batch_size=batch_size,
             epochs=epochs,
             multiplier=multiplier,
+            train_benign=self.train_benign,
+            train_attacks=self.train_attacks,
+            output_dir=self.output_dir,
         )
 
         self.best_y_max = comp1_res["best_y_max"]
@@ -191,6 +203,7 @@ class SequentialTuningPipeline:
             "best_score": comp1_res["best_score"],
             "metric": self.metric_key,
             "details": comp1_res["history"],
+            "tuning_plot": comp1_res.get("tuning_plot"),
         }
         return comp1_res
 
@@ -215,8 +228,11 @@ class SequentialTuningPipeline:
         print(f"PIPELINE ROUND 2: TUNING GENERATORS ({self.generator_type.upper()}) BASED ON IDS EVALUATION")
         print("#" * 85)
 
-        train_benign = train_df[train_df["Label"] == 0].copy().reset_index(drop=True)
-        real_train_attacks = train_df[train_df["Label"] == 1].copy().reset_index(drop=True)
+        if self.train_benign is not None and self.train_attacks is not None:
+            train_benign = self.train_benign
+            real_train_attacks = self.train_attacks
+        else:
+            train_benign, real_train_attacks = split_benign_attack(train_df, verbose=False)
 
         # Pass the SMOTE-NC pre-balanced attack dataset from Round 1 to CTGAN
         if self.best_train_resampled is not None and not self.best_train_resampled.empty:
@@ -266,6 +282,7 @@ class SequentialTuningPipeline:
 
         improvement = r2_score - r1_score
         print(f"\n[Round 2 Result] Val {self.metric_key} = {r2_score:.4f} (Round 1 Baseline: {r1_score:.4f}, Improvement: +{improvement:.4f})")
+        print("[Round 2 Complete] Advancing to Round 3...\n")
 
         self.best_synthetic_flows = df_candidate_pool
         self.round_history["round2"] = {
@@ -277,10 +294,6 @@ class SequentialTuningPipeline:
             "improvement_over_r1": improvement,
             "metric": self.metric_key,
         }
-
-        if abs(improvement) < self.epsilon:
-            print(f"[Stopping Condition Reached] Improvement ({improvement:.5f}) < epsilon ({self.epsilon}).")
-            print("Advancing to Round 3...")
 
         return self.round_history["round2"]
 
@@ -296,14 +309,17 @@ class SequentialTuningPipeline:
         """
         Round 3: Tunes SyntheticSampleFilter threshold on the candidate pool.
         Evaluates each threshold via FinalIDSModel on val_df.
-        Advances to Final Round when improvement < epsilon.
+        Runs all candidate thresholds without early stopping, then plots tuning curve.
         """
         print("\n" + "#" * 85)
         print("PIPELINE ROUND 3: TUNING SAMPLE FILTER BASED ON IDS EVALUATION")
         print("#" * 85)
 
-        train_benign = train_df[train_df["Label"] == 0].copy().reset_index(drop=True)
-        train_attacks = train_df[train_df["Label"] == 1].copy().reset_index(drop=True)
+        if self.train_benign is not None and self.train_attacks is not None:
+            train_benign = self.train_benign
+            train_attacks = self.train_attacks
+        else:
+            train_benign, train_attacks = split_benign_attack(train_df, verbose=False)
 
         # If Round 2 did not generate a candidate pool, sample one now
         if self.best_synthetic_flows is None or self.best_synthetic_flows.empty:
@@ -319,6 +335,7 @@ class SequentialTuningPipeline:
             ids_model=self.ids_model,
             syn_deficit=self.best_syn_deficit,
             candidate_thresholds=candidate_thresholds,
+            output_dir=self.output_dir,
         )
 
         best_clean_syn = comp3_res["best_kept_df"]
@@ -338,6 +355,7 @@ class SequentialTuningPipeline:
             "kept_synthetic_samples": len(best_clean_syn),
             "metric": self.metric_key,
             "details": comp3_res["history"],
+            "tuning_plot": comp3_res.get("tuning_plot"),
         }
         return comp3_res
 
@@ -404,6 +422,17 @@ class SequentialTuningPipeline:
                 seed=self.random_state,
             )
 
+        kept_per_class = (
+            {str(k): int(v) for k, v in self.best_clean_syn["Attack"].value_counts().items()}
+            if self.best_clean_syn is not None and not self.best_clean_syn.empty and "Attack" in self.best_clean_syn.columns
+            else {}
+        )
+        gen_details = (
+            self.generators.get_generator_details()
+            if hasattr(self.generators, "get_generator_details")
+            else {"diagnostics": getattr(self.generators, "training_diagnostics", {})}
+        )
+
         # Compile and export best parameters across all rounds
         best_params_payload = {
             "pipeline_configuration": {
@@ -425,12 +454,14 @@ class SequentialTuningPipeline:
                 "fixed_gradient_updates": self.fixed_gradient_updates,
                 "weights_checkpoint": str(self.output_dir / "round2_best_weights.pt"),
                 "diagnostics": getattr(self.generators, "training_diagnostics", {}),
+                "details": gen_details,
                 "val_score": self.round_history.get("round2", {}).get("val_score", None),
             },
             "round3_sample_filter_best_params": {
                 "best_oof_threshold": self.round_history.get("round3", {}).get("best_threshold", 0.6),
                 "enn_neighbors": 3,
                 "kept_samples": self.round_history.get("round3", {}).get("kept_synthetic_samples", None),
+                "kept_samples_per_class": kept_per_class,
                 "best_score": self.round_history.get("round3", {}).get("best_score", None),
             },
             "final_round_ids_model_best_params": comp4_tune_res["best_params"],
@@ -561,6 +592,8 @@ class SequentialTuningPipeline:
             "synthetic_quality": synthetic_quality_report or {},
             "distribution_distances": dist_report,
         }
+        if self.generator_type == "tvae" and hasattr(self.generators, "get_generator_details"):
+            summary_payload["tvae_detailed_summary"] = self.generators.get_generator_details()
 
         # Write summary JSON to destined directory
         dest_json_path = self.output_dir / "pipeline_tuning_summary.json"
@@ -794,7 +827,7 @@ class SequentialTuningPipeline:
         md_lines.append("")
 
         # 6. Optimal Hyperparameters Discovered
-        md_lines.append("## 6. Optimal Hyperparameters Summary")
+        md_lines.append("## 6. Optimal Hyperparameters Summary & Tuning Curves")
         md_lines.append("")
         md_lines.append("### Round 1: Intra-Attack Resampler (SMOTE-NC)")
         r1_p = best_params_payload.get("round1_resampler_best_params", {})
@@ -802,6 +835,23 @@ class SequentialTuningPipeline:
         md_lines.append(f"- **Downstream Score:** `{r1_p.get('best_score', 'N/A')}`")
         md_lines.append(f"- **Synthetic Deficit Quota:** `{json.dumps(r1_p.get('syn_deficit', {}))}`")
         md_lines.append("")
+
+        r1_hist = self.round_history.get("round1", {}).get("details", [])
+        if r1_hist:
+            md_lines.append("#### Round 1 Evaluation Across All Candidates:")
+            md_lines.append("| Candidate $y_{\\max}$ | Val Macro F1 | SMOTE Rows | Syn Kept | Time (s) |")
+            md_lines.append("| :---: | :---: | :---: | :---: | :---: |")
+            for h in r1_hist:
+                y_v = h.get("y_max", "-")
+                s_v = f"{h.get(self.metric_key, 0.0):.4f}"
+                sm_v = f"{h.get('smote_resampled_rows', 0):,}"
+                sy_v = f"{h.get('filtered_syn_rows', 0):,}"
+                t_v = f"{h.get('elapsed_sec', 0.0):.2f}"
+                star = " 🌟 *(Best)*" if y_v == r1_p.get("best_y_max") else ""
+                md_lines.append(f"| **{y_v}**{star} | `{s_v}` | {sm_v} | {sy_v} | {t_v} |")
+            md_lines.append("")
+            md_lines.append("![Round 1 Tuning Curve](round1_ymax_tuning.png)")
+            md_lines.append("")
 
         md_lines.append(f"### Round 2: Tabular Generators ({self.generator_type.upper()})")
         r2_p = best_params_payload.get("round2_generator_best_params", {})
@@ -818,6 +868,23 @@ class SequentialTuningPipeline:
         md_lines.append(f"- **Retained High-Fidelity Synthetic Flows:** `{r3_p.get('kept_samples', 'N/A')}`")
         md_lines.append(f"- **Downstream Score:** `{r3_p.get('best_score', 'N/A')}`")
         md_lines.append("")
+
+        r3_hist = self.round_history.get("round3", {}).get("details", [])
+        if r3_hist:
+            md_lines.append("#### Round 3 Evaluation Across All Thresholds:")
+            md_lines.append("| Threshold $\\theta$ | Val Macro F1 | Balanced Acc | Kept Synthetic | Time (s) |")
+            md_lines.append("| :---: | :---: | :---: | :---: | :---: |")
+            for h in r3_hist:
+                th_v = h.get("threshold", "-")
+                s_v = f"{h.get(self.metric_key, 0.0):.4f}"
+                ba_v = f"{h.get('balanced_acc', 0.0):.4f}"
+                sy_v = f"{h.get('kept_synthetic_flows', 0):,}"
+                t_v = f"{h.get('elapsed_sec', 0.0):.2f}"
+                star = " 🌟 *(Best)*" if th_v == r3_p.get("best_oof_threshold") else ""
+                md_lines.append(f"| **{th_v}**{star} | `{s_v}` | `{ba_v}` | {sy_v} | {t_v} |")
+            md_lines.append("")
+            md_lines.append("![Round 3 Tuning Curve](round3_threshold_tuning.png)")
+            md_lines.append("")
 
         md_lines.append("### Final Round: Final IDS Model (Two-Tier Classifier)")
         r4_p = best_params_payload.get("final_round_ids_model_best_params", {})
@@ -837,6 +904,9 @@ class SequentialTuningPipeline:
         md_lines.append("| Artifact Filename | Type | Description |")
         md_lines.append("| :--- | :--- | :--- |")
         md_lines.append("| `evaluation_report.md` | Markdown Report | Comprehensive evaluation, per-class metrics, quality benchmarks |")
+        md_lines.append("| `round1_ymax_tuning.png` | Plot Image | Tuning curve across SMOTE-NC multiplication factors y_max |")
+        md_lines.append("| `round3_threshold_tuning.png` | Plot Image | Tuning curve across OOF filter confidence thresholds |")
+        md_lines.append("| `tuning_curves_summary.png` | Plot Image | Consolidated multi-panel tuning curves (Comp 1 & Comp 3) |")
         md_lines.append("| `best_params.json` | JSON Config | All optimal hyperparameters across components 1-4 |")
         md_lines.append("| `pipeline_tuning_summary.json` | JSON Metrics | Complete structured numerical metrics across all splits and rounds |")
         md_lines.append(f"| `round2_best_weights.pt` | PyTorch Weights | Trained {self.generator_type.upper()} generator model checkpoint |")
@@ -880,8 +950,21 @@ class SequentialTuningPipeline:
         print(f"Test Flows:      {len(test_df):,}")
         print(f"Holdout Flows:   {len(holdout_df):,}" if holdout_df is not None else "Holdout: None")
         print(f"Target Ceiling:  t_max = {self.t_max:,}")
-        print(f"Convergence eps: {self.epsilon}")
         print(f"Generator Type:  {self.generator_type.upper()} ({self.fixed_gradient_updates:,} gradient updates)")
+        print("Tuning Strategy: Exhaustive candidate evaluation (stopping conditions dropped, curves plotted)\n")
+
+        # Step 0: Disaggregate Benign and Attack training flows upfront
+        print("=" * 85)
+        print("ORCHESTRATOR INITIALIZATION: SPLITTING BENIGN AND ATTACK TRAINING FLOWS")
+        print("=" * 85)
+        self.train_benign, self.train_attacks = split_benign_attack(train_df, verbose=True)
+
+        # Step 0b: Fit OOF Predictor & ENN Index strictly on real training attack flows upfront
+        print("\n" + "=" * 85)
+        print("ORCHESTRATOR INITIALIZATION: PRE-FITTING OOF PREDICTOR & ENN ON REAL ATTACK FLOWS")
+        print("=" * 85)
+        self.sample_filter.fit_oof_predictor(self.train_attacks)
+        self.sample_filter.fit_enn(self.train_attacks)
 
         # Round 1
         self.run_round1_tune_comp1(train_df=train_df, val_df=val_df, candidate_ymax=candidate_ymax)
@@ -891,6 +974,13 @@ class SequentialTuningPipeline:
 
         # Round 3
         self.run_round3_tune_comp3(train_df=train_df, val_df=val_df, candidate_thresholds=candidate_thresholds)
+
+        # Export consolidated multi-panel tuning summary plot
+        self.tuner.plot_combined_tuning_summary(
+            r1_history=self.round_history.get("round1", {}).get("details", []),
+            r3_history=self.round_history.get("round3", {}).get("details", []),
+            output_dir=self.output_dir,
+        )
 
         # Final Round
         final_results = self.run_final_round_tune_comp4(
