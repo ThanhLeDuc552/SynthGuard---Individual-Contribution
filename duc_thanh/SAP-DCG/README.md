@@ -22,39 +22,44 @@ The framework integrates CTGAN deep conditional generation derived from Minh's p
 SAP-DCG/
 ├── README.md                     # Framework documentation & usage guide
 ├── run_pipeline.py               # Standalone CLI execution script
+├── requirements.txt              # Python package dependencies
 ├── __init__.py                   # Package exports for SAP-DCG
 │
 ├── dataset/                      # Self-contained dataset storage
-│   ├── original/                 # Pristine raw NetFlow v3 benchmark dataset
-│   │   ├── NF-UNSW-NB15-v3.csv
-│   │   └── NetFlow_v3_Features.csv
+│   ├── NF-UNSW-NB15-v3.csv       # Raw benchmark dataset (~577 MB)
+│   ├── NetFlow_v3_Features.csv   # NetFlow-v3 schema definitions
+│   ├── synthetic_deficit.json    # Pre-computed deficit quotas (n_syn, t_c, n_c)
 │   ├── dev_splits/               # 80% Dev partition splits (train, val, test)
 │   ├── holdout_set/              # 20% Pristine Holdout test set
+│   ├── original/                 # Raw NetFlow v3 benchmark backup
 │   ├── IDS-multiclass-classification/ # Resampled augmented datasets
-│   └── generators/               # Generative checkpoints (CTGAN / TVAE weights)
+│   └── generators/               # Legacy standalone generator inputs
 │
 ├── components/                   # Modular pipeline components
 │   ├── __init__.py
 │   ├── dataset_splitter.py       # Independent partitioning & Benign/Attack disaggregation
 │   ├── intra_attack_resampler.py # Component 1: Steps 1-6 SMOTE-NC & deficit logic
-│   ├── tabular_generators.py     # Component 2: CTGAN & TVAE models (Minh's logic)
+│   ├── tabular_generators.py     # Component 2: CTGAN (NetFlowPreprocessor) & TVAE (TVAEPreprocessor + per-class SDV)
 │   ├── synthetic_sample_filter.py# Component 3: Domain rules, 5-Fold OOF gate & ENN (n=3)
-│   └── final_ids_model.py        # Component 4: Two-Tier IDS model & 5-pillar metrics (Tuan's logic)
+│   └── final_ids_model.py        # Component 4: Two-Tier IDS model & 5-pillar metrics
 │
 ├── orchestration/                # Multi-round coordination & optimization
 │   ├── __init__.py
 │   ├── pipeline_tuner.py         # Unified Tuner consolidating Rounds 1–4 optimization
 │   └── pipeline_orchestrator.py  # Master 4-round sequential tuning pipeline
 │
-├── notebooks/                    # Interactive Jupyter notebooks
-│   └── nf_unsw_resampling_v2.ipynb # Steps 1–3 data preparation & Component 1 execution
+├── notebooks/                    # Interactive Jupyter diagnostic notebooks (DuckDB-accelerated)
+│   ├── nf_unsw_v3_ctgan.ipynb    # CTGAN results & 8-section empirical diagnostics
+│   └── nf_unsw_v3_tvae.ipynb     # TVAE results & 8-section empirical diagnostics
 │
-└── docs/                         # Specifications & research documents
-    ├── components.txt            # Component requirements & multi-round pipeline specs
-    ├── dataset.txt               # NF-UNSW-NB15-v3 preprocessing & mathematical formulas
-    ├── evaluation.txt            # Baseline comparison methods & target metrics
-    ├── problems.txt              # Data science & AI challenges addressed
-    └── problems to read.txt      # Shortcut learning references
+├── results/                      # Experiment outputs & comparison reports
+│   ├── ctgan/                    # CTGAN pipeline runs (result_1, result_2)
+│   ├── tvae/                     # TVAE pipeline runs (result_1)
+│   └── ctgan_vs_tvae_comparison_report.md # Cross-generator empirical comparison
+│
+└── docs/                         # Architecture & dataset documentation
+    ├── pipeline_plan.md          # Master pipeline plan, architecture & hyperparameters
+    └── data_info.md              # Dataset hierarchy, active splits & legacy inventory
 ```
 
 ---
@@ -65,7 +70,7 @@ SAP-DCG/
 | :--- | :--- | :--- |
 | **Dataset Splitter** | `components/dataset_splitter.py` | Standalone reproducible dataset partitioning (single seed); extracts 80/20 Holdout and 70/10/20 Train/Val/Test dev splits; disaggregates Benign vs Attack flows upfront for independent processing. |
 | **Component 1** | `components/intra_attack_resampler.py` | Calculates Synthetic Deficit $n_{\text{syn}}$ per minority attack class, normalizes continuous features, and resamples attack flows via SMOTE-NC without altering Benign distributions. |
-| **Component 2** | `components/tabular_generators.py` | **Minh's Logic**: NetFlow preprocessor (`NetFlowPreprocessor`), PAC-aligned batch sizing, conditional rejection sampling (`sample_by_class`) to enforce class consistency, TVAE pool sampling (`sample_pool_by_class`), and post-generation validity clipping/rounding under 42,000 gradient updates. |
+| **Component 2** | `components/tabular_generators.py` | **CTGAN & TVAE Paths**: For **CTGAN**, uses `NetFlowPreprocessor`, PAC-aligned batch sizing, and conditional rejection sampling (`sample_by_class`). For **TVAE**, uses `TVAEPreprocessor` (`min_code_count=3`, `log_threshold=1000.0`) and trains per-minority-class `sdv.single_table.TVAESynthesizer` models (`_train_tvae`) with `sample_pool_by_class`, exporting per-class `.pkl` models to `weights/` and metadata via `get_generator_details()`. Both run under 42,000 gradient updates. |
 | **Component 3** | `components/synthetic_sample_filter.py` | Enforces physical NetFlow domain invariants (TCP flag consistency, packet/byte constraints); gates samples via 5-Fold OOF XGBoost confidence; prunes boundary outliers via ENN ($n=3$). Fitted once upfront on real training flows. |
 | **Component 4** | `components/final_ids_model.py` | **Tuan's Logic**: Two-Tier IDS architecture (Tier 1 Binary + Anomaly gating, Tier 2 AttackTyper multiclass). Optional sample weighting (`weight_method="none"` by default). Computes Macro F1, Balanced Accuracy, Detection Rate (DR), False Alarm Rate (FAR), MCC, PR-AUC, and 5-pillar synthetic quality metrics (`evaluate_synthetic_quality`). |
 
@@ -108,7 +113,7 @@ When executing `run_pipeline.py` with `--output-dir <path>` (or `--out-dir` / `-
 | `tuning_curves_summary.png` | PNG Image | Consolidated 2-panel summary plot comparing Round 1 and Round 3 tuning curves. |
 | `best_params.json` | JSON | All optimal hyperparameters discovered across Rounds 1–4. |
 | `pipeline_tuning_summary.json` | JSON | Complete numerical evaluation payload across all partitions and tuning rounds. |
-| `round2_best_weights.pt` | PyTorch Weights | Saved weights and preprocessor state for the trained CTGAN / TVAE generator. |
+| `round2_best_weights.pt` | PyTorch / Metadata | Saved weights and preprocessor state for CTGAN, or TVAE checkpoint metadata (with per-class `.pkl` models in `weights/`). |
 | `final_ids_model.joblib` | Model Checkpoint | Serialized state of the trained Two-Tier Intrusion Detection System. |
 | `unsw_nb15_final_pipeline_train.csv` | CSV Dataset | The finalized, augmented NetFlow training dataset with balanced minority attack classes. |
 | `synthetic_samples_kept.csv` | CSV Dataset | The quality-filtered synthetic attack flows generated by CTGAN/TVAE and retained by the sample filter. |

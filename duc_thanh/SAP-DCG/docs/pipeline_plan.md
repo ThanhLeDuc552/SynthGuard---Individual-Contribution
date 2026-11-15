@@ -21,7 +21,7 @@ flowchart TD
         DEV --> DISAGG["Upfront Partition Disaggregation\n• Split Train into Benign vs Attack flows\n• Pre-fit OOF 5-Fold XGBoost & ENN (k=3) upfront"]
         DISAGG --> R1["Round 1: IntraAttackResampler (SMOTE-NC)\n• Exhaustive evaluation y_max ∈ [1, 5, 10, 15, 20, 25, 30, 40]\n• Compute Deficit Quota n_syn\n• Evaluate on FinalIDSModel (val Macro F1)\n• Plot y_max tuning curve (round1_ymax_tuning.png)"]
         
-        R1 --> R2["Round 2: TabularGenerators (CTGAN)\n• Train CTGAN on SMOTE-NC pre-balanced dataset\n• Fixed 42,000 gradient updates\n• Draw 10x n_syn candidate synthetic flows\n• Evaluate on FinalIDSModel"]
+        R1 --> R2["Round 2: TabularGenerators (CTGAN / TVAE)\n• Train CTGAN (unified) or TVAE (per-minority-class SDV) on Round 1 data\n• Fixed 42,000 gradient updates\n• Draw 10x n_syn candidate synthetic flows\n• Evaluate on FinalIDSModel"]
         
         R2 --> R3["Round 3: SyntheticSampleFilter\n• NetFlow Domain & Protocol Invariant Rules\n• 5-Fold XGBoost OOF Confidence Gate\n• Edited Nearest Neighbors (ENN, k=3)\n• Exhaustive evaluation θ ∈ [0.4, 0.5, 0.6, 0.7, 0.8]\n• Plot threshold & summary tuning curves"]
         
@@ -31,7 +31,7 @@ flowchart TD
     subgraph S3["Phase 3: Multi-Partition Evaluation & Artifact Export"]
         R4 --> EVAL["Comprehensive Benchmark Evaluation\n(Validation, Test, and Holdout Partitions)"]
         EVAL --> ART["Export Destination Directory (--output-dir)\n• evaluation_report.md (Granular Per-Class Metrics)\n• best_params.json (All Optimal Hyperparameters)\n• pipeline_tuning_summary.json (Full Metrics Payload)\n• round2_best_weights.pt (Trained CTGAN Checkpoint)\n• final_ids_model.joblib (Trained Two-Tier IDS)\n• unsw_nb15_final_pipeline_train.csv (Augmented Dataset)\n• synthetic_samples_kept.csv (Clean Synthetic Flows)"]
-        ART --> NB["Diagnostic Notebook Visualization\n(nf_unsw_resampling_v2.ipynb)"]
+        ART --> NB["Diagnostic Notebook Visualization (DuckDB-Accelerated)\n• notebooks/nf_unsw_v3_ctgan.ipynb\n• notebooks/nf_unsw_v3_tvae.ipynb"]
     end
 ```
 
@@ -53,17 +53,14 @@ flowchart TD
 ---
 
 ### 2.2 Component 2: Deep Tabular Generators ([`TabularGenerators`](../components/tabular_generators.py))
-- **File:** `SAP-DCG/components/tabular_generators.py`
-- **Role:** High-dimensional non-linear generation of minority attack flows.
-- **Integrated Architecture (Minh's Methodology):**
-  - Incorporates `NetFlowPreprocessor` with `np.log1p` transformation on heavy-tailed packet/byte counts.
-  - CTGAN generator trained with PAC clustering (`pac = 10` or dynamic PAC alignment based on sample density).
-  - Conditional rejection sampling (`sample_by_class`) enforcing strict class condition alignment.
+- **File:** `components/tabular_generators.py`
+- **Role:** High-dimensional non-linear generation of minority attack flows under a fixed **42,000 gradient update** budget.
+- **Dual Generator Architecture (`ctgan` vs. `tvae`):**
+  - **CTGAN Path (`NetFlowPreprocessor`):** Applies `np.log1p` transformation on heavy-tailed features, trains a unified conditional `CTGAN` with PAC clustering (`pac = 10` or dynamic PAC alignment), and enforces class consistency via conditional rejection sampling (`sample_by_class` / `sample_matched`).
+  - **TVAE Path (`TVAEPreprocessor`):** Fits `TVAEPreprocessor` (`min_code_count = 3`, `log_threshold = 1000.0`) with log-scaling and integer/non-negative/code snapping, trains per-minority-class `sdv.single_table.TVAESynthesizer` models (`_train_tvae`) when `syn_deficit[c] > 0`, and samples via `sample_pool_by_class`. Exports per-class `.pkl` models to `weights/` and populates `tvae_detailed_summary` in `pipeline_tuning_summary.json`.
 - **Fixed Gradient Update Budget:**
-  - Trains under a strict computational budget of **42,000 gradient updates**.
-  - Dynamically computes epochs:
-    $$\text{steps\_per\_epoch} = \max\left(1, \lfloor n_{\text{samples}} / \text{batch\_size} \rfloor\right)$$
-    $$N_{\text{epochs}} = \left\lceil \frac{42,000}{\text{steps\_per\_epoch}} \right\rceil$$
+  - Dynamically computes epochs from sample count and batch size:
+    $$\text{steps\_per\_epoch} = \max\left(1, \lfloor n_{\text{samples}} / \text{batch\_size} \rfloor\right), \quad N_{\text{epochs}} = \left\lceil \frac{42,000}{\text{steps\_per\_epoch}} \right\rceil$$
 - **Training Input Data:** Receives the SMOTE-NC pre-balanced attack dataset (`self.best_train_resampled[Label == 1]`) to supply sufficient sample density and prevent mode collapse on extreme minority attacks (e.g., Worms, Shellcode).
 - **Candidate Pool Sampling:** Generates a candidate surplus of **$10 \times n_{\text{syn}}$** flows per minority class.
 - **Post-Sampling Inverse Transformation:** Reverses logarithmic scaling via `np.expm1`, clips features to valid training bounds, and rounds discrete counts to integers.
@@ -195,19 +192,28 @@ flowchart LR
 Execute the master runner with custom destination output directory:
 
 ```bash
-# Full execution with CTGAN generator and 0.002 convergence epsilon
-python SAP-DCG/run_pipeline.py \
+# Full execution with CTGAN generator
+python run_pipeline.py \
     --generator ctgan \
     --epsilon 0.002 \
     --t-max 10000 \
     --fixed-updates 42000 \
-    --output-dir SAP-DCG/results
+    --output-dir results/ctgan/result_2
+
+# Full execution with TVAE generator
+python run_pipeline.py \
+    --generator tvae \
+    --epsilon 0.002 \
+    --t-max 10000 \
+    --fixed-updates 42000 \
+    --output-dir results/tvae/result_1
 ```
 
 ### 5.2 Inspecting Visualizations & Diagnostics
-All generated artifacts in the destination folder are automatically visualized by:
-- **Notebook:** `SAP-DCG/notebooks/nf_unsw_resampling_v2.ipynb`
-- Displays multi-split defense radars, per-class precision/recall/F1 bar charts, normalized confusion matrices, 5-pillar synthetic quality dashboards, and continuous Wasserstein distance charts.
+All generated artifacts in the destination folder are visualized via DuckDB-accelerated notebooks:
+- **CTGAN Notebook:** `notebooks/nf_unsw_v3_ctgan.ipynb`
+- **TVAE Notebook:** `notebooks/nf_unsw_v3_tvae.ipynb`
+- Both materialize the pipeline and reference splits into DuckDB tables first, then render multi-split defense benchmarks, per-class precision/recall/F1 charts, normalized confusion matrices, multi-round tuning curves, 5-pillar synthetic quality dashboards, and continuous Wasserstein distance charts.
 
 ---
 
@@ -223,8 +229,9 @@ When the pipeline completes, the destination folder (`--output-dir`) contains:
 | `tuning_curves_summary.png` | PNG Plot | Consolidated two-panel tuning summary comparing Round 1 and Round 3 optimization. |
 | `best_params.json` | JSON | Optimal configuration and parameters across all four components. |
 | `pipeline_tuning_summary.json` | JSON | Complete structured numerical metrics for programmatic analysis. |
-| `round2_best_weights.pt` | PyTorch | Serialized weights and preprocessor state for the trained CTGAN model. |
+| `round2_best_weights.pt` | PyTorch / Metadata | Serialized weights and preprocessor state for CTGAN, or TVAE checkpoint metadata (with per-class `.pkl` models in `weights/`). |
+| `weights/` | Directory | Per-minority-class SDV `TVAESynthesizer` `.pkl` checkpoints (when `--generator tvae` trains per-class models). |
 | `final_ids_model.joblib` | Model State | Trained Two-Tier IDS detector (Tier-1 supervised detector, Anomaly detector, Tier-2 AttackTyper). |
 | `unsw_nb15_final_pipeline_train.csv` | CSV | Final augmented NetFlow training set with balanced minority attack classes. |
-| `synthetic_samples_kept.csv` | CSV | Filtered high-fidelity synthetic flows generated by CTGAN. |
+| `synthetic_samples_kept.csv` | CSV | Filtered high-fidelity synthetic flows generated by CTGAN/TVAE. |
 
