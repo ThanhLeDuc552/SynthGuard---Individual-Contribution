@@ -42,7 +42,8 @@ for p in [curr_dir, pkg_root, comp_dir]:
 
 try:
     from components.intra_attack_resampler import resolve_paths, SHORTCUT_COLS, CATEGORICAL_FEATURES, IntraAttackResampler
-    from components.tabular_generators import TabularGenerators
+    from components.ctgan_generator import CTGANGenerator
+    from components.tvae_generator import TVAEGenerator
     from components.synthetic_sample_filter import SyntheticSampleFilter
     from components.final_ids_model import FinalIDSModel
     from components.dataset_splitter import split_benign_attack, DatasetSplitter
@@ -53,7 +54,8 @@ except ImportError:
     except ImportError:
         from pipeline_tuner import PipelineTuner
     from intra_attack_resampler import resolve_paths, SHORTCUT_COLS, CATEGORICAL_FEATURES, IntraAttackResampler
-    from tabular_generators import TabularGenerators
+    from ctgan_generator import CTGANGenerator
+    from tvae_generator import TVAEGenerator
     from synthetic_sample_filter import SyntheticSampleFilter
     from final_ids_model import FinalIDSModel
     try:
@@ -116,12 +118,20 @@ class SequentialTuningPipeline:
             random_state=self.random_state,
             final_dir=self.final_dir,
         )
-        self.generators = TabularGenerators(
-            model_type=self.generator_type,
-            fixed_gradient_updates=self.fixed_gradient_updates,
-            random_state=self.random_state,
-            weights_dir=self.output_dir / "weights",
-        )
+        if self.generator_type == "ctgan":
+            self.generators = CTGANGenerator(
+                fixed_gradient_updates=self.fixed_gradient_updates,
+                random_state=self.random_state,
+                weights_dir=self.output_dir / "weights",
+            )
+        elif self.generator_type == "tvae":
+            self.generators = TVAEGenerator(
+                fixed_gradient_updates=self.fixed_gradient_updates,
+                random_state=self.random_state,
+                weights_dir=self.output_dir / "weights",
+            )
+        else:
+            raise ValueError(f"Unsupported generator_type: '{self.generator_type}'. Choose 'ctgan' or 'tvae'.")
         self.sample_filter = SyntheticSampleFilter(
             random_state=self.random_state,
             default_oof_threshold=0.6,

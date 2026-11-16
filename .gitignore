@@ -1,0 +1,25 @@
+reports/
+papers/
+datasets/
+dataset/
+environment.yml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment variables and secrets
+.env
+
+# IDE
+.vscode/
+
+# DuckDB tmp
+.tmp/
+
+# Data artifacts & Large outputs
+*.csv
+SAP-DCG/dataset/
+SAP-DCG/results/

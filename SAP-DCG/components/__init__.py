@@ -3,7 +3,8 @@ Component Modules for NF-UNSW-NB15-v3 Data Processing & Resampling.
 
 Components:
 - Component 1: IntraAttackResampler (intra_attack_resampler.py)
-- Component 2: TabularGenerators (tabular_generators.py)
+- Component 2: CTGANGenerator (ctgan_generator.py), TVAEGenerator (tvae_generator.py),
+               and TabularGenerators facade (tabular_generators.py)
 - Component 3: SyntheticSampleFilter (synthetic_sample_filter.py)
 - Component 4: FinalIDSModel (final_ids_model.py)
 """
@@ -19,12 +20,20 @@ from .intra_attack_resampler import (
     resolve_paths,
     run_full_pipeline,
 )
-from .tabular_generators import (
-    TabularGenerators,
+from .ctgan_generator import (
+    CTGANGenerator,
     NetFlowPreprocessor,
     CTGAN_DIMS,
     CAT_CANDIDATES,
 )
+from .tvae_generator import (
+    TVAEGenerator,
+    TVAEPreprocessor,
+    TVAE_CODE_COLS,
+    TVAE_DIMS,
+    TVAE_DEFAULT_PARAMS,
+)
+from .tabular_generators import TabularGenerators
 from .synthetic_sample_filter import SyntheticSampleFilter
 from .final_ids_model import (
     FinalIDSModel,
@@ -38,8 +47,14 @@ __all__ = [
     "split_benign_attack",
     "IntraAttackResampler",
     "TabularGenerators",
+    "CTGANGenerator",
+    "TVAEGenerator",
     "NetFlowPreprocessor",
+    "TVAEPreprocessor",
     "CTGAN_DIMS",
+    "TVAE_CODE_COLS",
+    "TVAE_DIMS",
+    "TVAE_DEFAULT_PARAMS",
     "CAT_CANDIDATES",
     "SyntheticSampleFilter",
     "FinalIDSModel",

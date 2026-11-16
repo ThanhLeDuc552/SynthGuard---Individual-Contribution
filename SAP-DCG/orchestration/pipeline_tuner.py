@@ -42,13 +42,17 @@ for p in [curr_dir, pkg_root, comp_dir]:
 
 try:
     from components.intra_attack_resampler import resolve_paths, SHORTCUT_COLS, CATEGORICAL_FEATURES, IntraAttackResampler
-    from components.tabular_generators import TabularGenerators, CTGAN_DIMS, TVAE_DIMS, TVAE_DEFAULT_PARAMS
+    from components.ctgan_generator import CTGANGenerator, CTGAN_DIMS
+    from components.tvae_generator import TVAEGenerator, TVAE_DIMS, TVAE_DEFAULT_PARAMS
+    from components.tabular_generators import TabularGenerators
     from components.synthetic_sample_filter import SyntheticSampleFilter
     from components.final_ids_model import FinalIDSModel, evaluate_synthetic_quality
     from components.dataset_splitter import split_benign_attack
 except ImportError:
     from intra_attack_resampler import resolve_paths, SHORTCUT_COLS, CATEGORICAL_FEATURES, IntraAttackResampler
-    from tabular_generators import TabularGenerators, CTGAN_DIMS, TVAE_DIMS, TVAE_DEFAULT_PARAMS
+    from ctgan_generator import CTGANGenerator, CTGAN_DIMS
+    from tvae_generator import TVAEGenerator, TVAE_DIMS, TVAE_DEFAULT_PARAMS
+    from tabular_generators import TabularGenerators
     from synthetic_sample_filter import SyntheticSampleFilter
     from final_ids_model import FinalIDSModel, evaluate_synthetic_quality
     try:
@@ -533,8 +537,8 @@ class PipelineTuner:
                 best_trial_models = {
                     "models": copy.deepcopy(generator.models),
                     "unified_model": copy.deepcopy(generator.unified_model),
-                    "preprocessor": copy.deepcopy(generator.preprocessor),
-                    "tvae_preprocessor": copy.deepcopy(generator.tvae_preprocessor),
+                    "preprocessor": copy.deepcopy(getattr(generator, "preprocessor", None)),
+                    "tvae_preprocessor": copy.deepcopy(getattr(generator, "tvae_preprocessor", None)),
                 }
                 generator.save_weights("best_tuned_generator_weights.pt")
 
@@ -555,8 +559,10 @@ class PipelineTuner:
         if best_trial_models is not None:
             generator.models = best_trial_models["models"]
             generator.unified_model = best_trial_models["unified_model"]
-            generator.preprocessor = best_trial_models["preprocessor"]
-            generator.tvae_preprocessor = best_trial_models["tvae_preprocessor"]
+            if hasattr(generator, "preprocessor"):
+                generator.preprocessor = best_trial_models["preprocessor"]
+            if hasattr(generator, "tvae_preprocessor"):
+                generator.tvae_preprocessor = best_trial_models["tvae_preprocessor"]
 
         return {
             "best_params": study.best_params,
