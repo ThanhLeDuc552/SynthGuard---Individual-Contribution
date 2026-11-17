@@ -1,2 +1,0 @@
-macrof1 < 50%: analysis, backdoor, shellcode, worms
-binary classification very good, not the same for attack-only clf

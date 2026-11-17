@@ -1,0 +1,6 @@
+MOST CRITICAL FEATURES:
+continuous features: FLOW_DURATION_MILISECONDS, DURATION_IN, SRC_TO_DST_IAT_MAX, TCP_WIN_MAX_OUT, MIN_IP_PKT_LEN, TCP_WIN_MAX_IN
+discrete features: CLIENT_TCP_FLAG, ICMP_TYPE, ICMP_IPV4_TYPE, TCP_FLAGS, L7_PROTO, PROTOCOL, SERVER_TCP_FLAGS
+
+- main contribution to high synthetic detection rate
+- totally different from the REAL distribution
