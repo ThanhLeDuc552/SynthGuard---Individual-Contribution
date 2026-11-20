@@ -352,11 +352,13 @@ class SequentialTuningPipeline:
         self.best_clean_syn = best_clean_syn
         self.best_train_resampled = pd.concat([train_benign, train_attacks, best_clean_syn], ignore_index=True)
 
-        # Export kept synthetic flows to output_dir
+        # Export kept synthetic flows to output_dir (remove stale file if empty)
+        kept_syn_path = self.output_dir / "synthetic_samples_kept.csv"
         if best_clean_syn is not None and not best_clean_syn.empty:
-            kept_syn_path = self.output_dir / "synthetic_samples_kept.csv"
             best_clean_syn.to_csv(kept_syn_path, index=False)
             print(f"  [SampleFilter Checkpoint] Saved {len(best_clean_syn):,} filtered synthetic flows to: {kept_syn_path.name}")
+        elif kept_syn_path.exists():
+            kept_syn_path.unlink()
 
         self.round_history["round3"] = {
             "component": "SyntheticSampleFilter",

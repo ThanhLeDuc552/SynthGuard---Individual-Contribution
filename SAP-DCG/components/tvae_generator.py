@@ -173,8 +173,13 @@ class TVAEGenerator:
         self.unified_model: Optional[Any] = None
         self.tvae_preprocessor: Optional[TVAEPreprocessor] = None
         self.best_weights_path: Optional[Path] = None
+        self.best_weights_size_bytes: int = 0
         self.per_class_model_paths: Dict[str, str] = {}
+        self.per_class_model_sizes: Dict[str, int] = {}
         self.training_diagnostics: Dict[str, Any] = {}
+        self.last_run_config: Dict[str, Any] = {}
+        self.last_total_train_sec: float = 0.0
+        self.last_sampling_diagnostics: Dict[str, Any] = {}
 
     def train(
         self,
@@ -232,11 +237,26 @@ class TVAEGenerator:
 
         self.unified_model = None
         self.models = {}
+        self.per_class_model_paths = {}
+        self.per_class_model_sizes = {}
+        self.last_run_config = {
+            "epochs": resolved_epochs,
+            "requested_batch_size": resolved_batch_size,
+            "embedding_dim": resolved_emb,
+            "dims": list(dims_tuple),
+            "l2scale": l2scale,
+            "loss_factor": loss_factor,
+            "device": self.device,
+            "random_state": self.random_state,
+            "fixed_gradient_updates": self.fixed_gradient_updates,
+            "target_classes": target_classes,
+        }
         diagnostics: Dict[str, Any] = {}
 
-        for cls_name in target_classes:
+        for idx, cls_name in enumerate(target_classes, 1):
             df_cls = train_attacks[train_attacks["Attack"] == cls_name].reset_index(drop=True)
             if df_cls.empty:
+                print(f"    [{idx}/{len(target_classes)}] Skipping '{cls_name}': 0 training rows.")
                 continue
 
             Z = self.tvae_preprocessor.to_model(df_cls)
@@ -249,6 +269,12 @@ class TVAEGenerator:
                 )
 
             cls_batch_size = max(2, min(resolved_batch_size, (len(Z) // 2) * 2)) if len(Z) >= 2 else len(Z)
+            steps_per_epoch = max(1, len(Z) // max(1, cls_batch_size))
+            print(
+                f"    [{idx}/{len(target_classes)}] Training TVAE '{cls_name}': "
+                f"samples={len(Z):,}, deficit={syn_deficit.get(cls_name, 0):,}, "
+                f"bs={cls_batch_size}, epochs={resolved_epochs}, steps/epoch={steps_per_epoch}..."
+            )
 
             t_cls = time.time()
             with warnings.catch_warnings():
@@ -270,33 +296,43 @@ class TVAEGenerator:
                 model.fit({"t": Z})
 
             self.models[cls_name] = model
+            cls_elapsed = round(time.time() - t_cls, 2)
             cls_diag: Dict[str, Any] = {
                 "samples": len(Z),
+                "syn_deficit": int(syn_deficit.get(cls_name, 0)),
                 "epochs": resolved_epochs,
                 "batch_size": cls_batch_size,
+                "steps_per_epoch": steps_per_epoch,
+                "total_gradient_updates": int(steps_per_epoch * resolved_epochs),
                 "embedding_dim": resolved_emb,
                 "dims": list(dims_tuple),
                 "l2scale": l2scale,
                 "loss_factor": loss_factor,
-                "elapsed_sec": round(time.time() - t_cls, 2),
+                "elapsed_sec": cls_elapsed,
             }
+            loss_summary = ""
             try:
                 loss_df = model.get_loss_values()
                 if loss_df is not None and not loss_df.empty:
                     loss_col = "Loss" if "Loss" in loss_df.columns else loss_df.columns[-1]
-                    cls_diag["initial_loss"] = round(float(loss_df[loss_col].iloc[0]), 6)
-                    cls_diag["final_loss"] = round(float(loss_df[loss_col].iloc[-1]), 6)
+                    losses = loss_df[loss_col].astype(float)
+                    cls_diag["initial_loss"] = round(float(losses.iloc[0]), 6)
+                    cls_diag["final_loss"] = round(float(losses.iloc[-1]), 6)
+                    cls_diag["min_loss"] = round(float(losses.min()), 6)
                     cls_diag["loss_epochs_recorded"] = int(len(loss_df))
+                    loss_summary = f" | loss: {cls_diag['initial_loss']:.4f} -> {cls_diag['final_loss']:.4f} (min={cls_diag['min_loss']:.4f})"
             except Exception:
                 pass
+            print(f"      -> Done '{cls_name}' in {cls_elapsed:.2f}s{loss_summary}")
             diagnostics[cls_name] = cls_diag
 
         self.training_diagnostics = diagnostics
-        print(f"    SDV TVAE training completed in {time.time() - t0:.2f}s.\n")
+        self.last_total_train_sec = round(time.time() - t0, 2)
+        print(f"    SDV TVAE training completed across {len(self.models)}/{len(target_classes)} per-class models in {self.last_total_train_sec:.2f}s.\n")
         return diagnostics
 
     def get_generator_details(self) -> Dict[str, Any]:
-        """Returns detailed TVAE generator metadata, hyperparameters, and per-class diagnostics."""
+        """Returns detailed TVAE generator metadata, main checkpoint info, and per-class diagnostics."""
         prep_info: Dict[str, Any] = {}
         if self.tvae_preprocessor is not None:
             prep_info = {
@@ -308,13 +344,30 @@ class TVAEGenerator:
                 "log_threshold": self.tvae_preprocessor.log_threshold,
             }
 
+        per_class_files_detailed: Dict[str, Any] = {}
+        for cls_name, cls_path in self.per_class_model_paths.items():
+            size_b = self.per_class_model_sizes.get(cls_name, 0)
+            per_class_files_detailed[cls_name] = {
+                "path": cls_path,
+                "size_bytes": size_b,
+                "size_mb": round(size_b / (1024 * 1024), 3),
+            }
+
         return {
             "library": "sdv.single_table.TVAESynthesizer",
             "mode": "per_class",
+            "main_checkpoint": {
+                "path": str(self.best_weights_path) if self.best_weights_path else None,
+                "size_bytes": self.best_weights_size_bytes,
+                "size_mb": round(self.best_weights_size_bytes / (1024 * 1024), 3),
+                "total_training_elapsed_sec": self.last_total_train_sec,
+                "hyperparameters": dict(self.last_run_config),
+            },
             "num_per_class_models": len(self.models),
             "trained_classes": list(self.models.keys()),
             "per_class_models": self.training_diagnostics,
-            "per_class_model_files": dict(self.per_class_model_paths),
+            "per_class_model_files": per_class_files_detailed,
+            "last_sampling_summary": self.last_sampling_diagnostics,
             "preprocessor": prep_info,
         }
 
@@ -365,9 +418,11 @@ class TVAEGenerator:
                     raw_parts.append(pd.concat(v, ignore_index=True))
         else:
             # Per-class generator sampling
+            samp_diag: Dict[str, Any] = {}
             for cls_name, model in self.models.items():
                 if cls_name not in quotas:
                     continue
+                t_s = time.time()
                 draw_count = quotas[cls_name]
                 batch = model.sample(num_rows=int(draw_count))
                 batch = batch["t"] if isinstance(batch, dict) else batch
@@ -375,6 +430,10 @@ class TVAEGenerator:
                     batch = self.tvae_preprocessor.from_model(batch)
                 batch["Attack"] = cls_name
                 raw_parts.append(batch)
+                s_elapsed = round(time.time() - t_s, 2)
+                samp_diag[cls_name] = {"quota": int(draw_count), "generated": int(len(batch)), "elapsed_sec": s_elapsed}
+                print(f"    - Sampled '{cls_name}': {len(batch):,}/{draw_count:,} flows in {s_elapsed:.2f}s")
+            self.last_sampling_diagnostics = samp_diag
 
         if not raw_parts:
             return pd.DataFrame()
@@ -410,13 +469,15 @@ class TVAEGenerator:
             pickle.dump(state, f)
 
         self.best_weights_path = save_path
-        print(f"    [Generators Checkpoint] Saved weights to: {save_path.name}")
+        self.best_weights_size_bytes = save_path.stat().st_size if save_path.exists() else 0
+        print(f"    [Generators Checkpoint] Saved main checkpoint: {save_path.name} ({self.best_weights_size_bytes / (1024 * 1024):.2f} MB)")
 
         # Export individual per-class SDV TVAE models alongside the unified checkpoint
         if self.models:
             per_class_dir = save_path.parent / "tvae_per_class_models"
             per_class_dir.mkdir(parents=True, exist_ok=True)
             self.per_class_model_paths = {}
+            self.per_class_model_sizes = {}
             for cls_name, model in self.models.items():
                 cls_path = per_class_dir / f"tvae_{cls_name}.pkl"
                 if hasattr(model, "save"):
@@ -424,7 +485,10 @@ class TVAEGenerator:
                 else:
                     with open(cls_path, "wb") as f:
                         pickle.dump(model, f)
+                cls_size = cls_path.stat().st_size if cls_path.exists() else 0
                 self.per_class_model_paths[cls_name] = str(cls_path)
+                self.per_class_model_sizes[cls_name] = cls_size
+                print(f"      - Exported '{cls_name}': {cls_path.name} ({cls_size / (1024 * 1024):.2f} MB)")
             print(f"    [Generators Checkpoint] Exported {len(self.per_class_model_paths)} per-class TVAE models to: {per_class_dir.name}/")
 
         return save_path

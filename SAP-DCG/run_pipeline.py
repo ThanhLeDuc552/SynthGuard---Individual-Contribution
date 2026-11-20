@@ -5,7 +5,7 @@ Master Execution Script for the 4-Round Sequential Tuning Pipeline.
 Implements the complete pipeline workflow defined in components.txt and docs/fixes.txt:
 - Data Splitting & Disaggregation: Uses DatasetSplitter to disaggregate Benign and Attack flows
   upfront, and fits the SyntheticSampleFilter (OOF 5-fold predictor & ENN index) immediately.
-- Round 1: Exhaustively tunes IntraAttackResampler (SMOTE-NC y_max in [1, 5, 10, 15, 20, 25, 30, 40])
+- Round 1: Exhaustively tunes IntraAttackResampler (SMOTE-NC y_max in [5, 10, 15, 20, 25, 30, 40])
   based on FinalIDSModel evaluation; plots y_max tuning curve.
 - Round 2: Tunes TabularGenerators (CTGAN / TVAE) based on FinalIDSModel evaluation with fixed 42k gradient updates.
 - Round 3: Exhaustively tunes SyntheticSampleFilter (OOF threshold in [0.4, 0.5, 0.6, 0.7, 0.8] & ENN n=3)

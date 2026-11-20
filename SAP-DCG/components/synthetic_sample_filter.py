@@ -300,15 +300,17 @@ class SyntheticSampleFilter:
         syn_deficit: Optional[Dict[str, int]] = None,
         oof_threshold: Optional[float] = None,
         run_enn: bool = True,
+        deduplicate: bool = True,
         scaler: Optional[Any] = None,
         was_log_transformed: bool = False,
     ) -> Dict[str, Any]:
         """
         Executes full Component 3 filtering pipeline:
           1. Reverse transformation & physical rules.
-          2. OOF confidence gating.
-          3. ENN neighborhood agreement gating.
-          4. Cap each class at target deficit n_syn (selecting top confidence samples).
+          2. Deduplicate intra-synthetic rows (and exact copies of real_train_df).
+          3. OOF confidence gating.
+          4. ENN neighborhood agreement gating.
+          5. Cap each class at target deficit n_syn (selecting top confidence samples).
         """
         t0 = time.time()
         thresh = oof_threshold if oof_threshold is not None else self.default_oof_threshold
@@ -335,6 +337,7 @@ class SyntheticSampleFilter:
                 "rejected_df": pd.DataFrame(),
                 "diagnostics": {
                     "input_count": 0,
+                    "duplicates_removed": 0,
                     "oof_pass_count": 0,
                     "enn_pass_count": 0,
                     "both_pass_count": 0,
@@ -348,6 +351,49 @@ class SyntheticSampleFilter:
         df_rules = self.apply_reverse_transform_and_rules(
             synthetic_df, scaler=scaler, was_log_transformed=was_log_transformed
         )
+
+        # 2. Deduplicate intra-synthetic flows and exact copies of real training flows
+        duplicates_removed = 0
+        if deduplicate and not df_rules.empty:
+            n_before_dedup = len(df_rules)
+            feature_dedup_cols = [c for c in df_rules.columns if c not in ["Label", "Attack", "OOF_Confidence"]]
+            intra_dedup_cols = feature_dedup_cols + (["Attack"] if "Attack" in df_rules.columns else [])
+            df_rules = df_rules.drop_duplicates(subset=intra_dedup_cols, keep="first").reset_index(drop=True)
+
+            if real_train_df is not None and not real_train_df.empty and all(c in real_train_df.columns for c in feature_dedup_cols):
+                real_cmp = real_train_df[feature_dedup_cols].drop_duplicates()
+                # Align dtypes so hash comparison matches exact integer/float values
+                for col in feature_dedup_cols:
+                    if real_cmp[col].dtype != df_rules[col].dtype:
+                        try:
+                            real_cmp[col] = real_cmp[col].astype(df_rules[col].dtype)
+                        except (ValueError, TypeError):
+                            pass
+                real_hashes = set(pd.util.hash_pandas_object(real_cmp, index=False).values)
+                syn_hashes = pd.util.hash_pandas_object(df_rules[feature_dedup_cols], index=False).values
+                non_copy_mask = ~np.isin(syn_hashes, list(real_hashes))
+                df_rules = df_rules[non_copy_mask].reset_index(drop=True)
+
+            duplicates_removed = n_before_dedup - len(df_rules)
+
+        if df_rules.empty:
+            elapsed = time.time() - t0
+            print(f"    Filtering Note: All {len(synthetic_df):,} candidates were removed as duplicates.")
+            print("=" * 80 + "\n")
+            return {
+                "kept_df": pd.DataFrame(),
+                "rejected_df": pd.DataFrame(),
+                "diagnostics": {
+                    "input_count": len(synthetic_df),
+                    "duplicates_removed": duplicates_removed,
+                    "oof_pass_count": 0,
+                    "enn_pass_count": 0,
+                    "both_pass_count": 0,
+                    "final_kept_count": 0,
+                    "threshold_used": thresh,
+                    "elapsed_sec": round(elapsed, 2),
+                },
+            }
 
         # 2. Ensure OOF predictor and ENN are fitted if real_train_df provided
         if not self.oof_models and real_train_df is not None:
@@ -396,6 +442,7 @@ class SyntheticSampleFilter:
         elapsed = time.time() - t0
         print(f"\n    Filtering Results:")
         print(f"      - Input Candidate Pool:     {len(synthetic_df):,}")
+        print(f"      - Duplicates Removed:       {duplicates_removed:,} ({duplicates_removed / len(synthetic_df) * 100:.2f}%)")
         print(f"      - Passed OOF Gate:          {oof_mask.sum():,} ({oof_mask.sum() / len(synthetic_df) * 100:.2f}%)")
         print(f"      - Passed ENN Check:         {enn_mask.sum():,} ({enn_mask.sum() / len(synthetic_df) * 100:.2f}%)")
         print(f"      - Passed Both Gates:        {combined_keep_mask.sum():,} ({combined_keep_mask.sum() / len(synthetic_df) * 100:.2f}%)")
@@ -407,6 +454,7 @@ class SyntheticSampleFilter:
             "rejected_df": df_rejected,
             "diagnostics": {
                 "input_count": len(synthetic_df),
+                "duplicates_removed": duplicates_removed,
                 "oof_pass_count": int(oof_mask.sum()),
                 "enn_pass_count": int(enn_mask.sum()),
                 "both_pass_count": int(combined_keep_mask.sum()),

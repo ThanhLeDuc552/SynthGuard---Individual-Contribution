@@ -256,7 +256,7 @@ class PipelineTuner:
         Runs all candidate cases without early stopping, then plots the tuning curve.
         """
         if candidate_ymax is None:
-            candidate_ymax = [1, 5, 10, 15, 20, 25, 30, 40]
+            candidate_ymax = [5, 10, 15, 20, 25, 30, 40]
 
         if train_benign is None or train_attacks is None:
             train_benign, real_train_attacks = split_benign_attack(train_df, verbose=False)

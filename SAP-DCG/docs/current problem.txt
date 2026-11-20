@@ -2,5 +2,7 @@ MOST CRITICAL FEATURES:
 continuous features: FLOW_DURATION_MILISECONDS, DURATION_IN, SRC_TO_DST_IAT_MAX, TCP_WIN_MAX_OUT, MIN_IP_PKT_LEN, TCP_WIN_MAX_IN
 discrete features: CLIENT_TCP_FLAG, ICMP_TYPE, ICMP_IPV4_TYPE, TCP_FLAGS, L7_PROTO, PROTOCOL, SERVER_TCP_FLAGS
 
-- main contribution to high synthetic detection rate
-- totally different from the REAL distribution
+Reasons:
+1. SMOTE-NC interpolates features LINEARLY, causing impossible values
+2. Cols like DST_TO_SRC_IAT_MIN, DURATION_OUT, SRC_TO_DST_SECOND_BYTES: near-constant columns (should be dropped)
+3. Cols like ICMP_TYPE, TCP_WIN_MAX_IN/OUT: should be categorical values due to large number of discrete values
