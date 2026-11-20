@@ -6,3 +6,4 @@ Reasons:
 1. SMOTE-NC interpolates features LINEARLY, causing impossible values
 2. Cols like DST_TO_SRC_IAT_MIN, DURATION_OUT, SRC_TO_DST_SECOND_BYTES: near-constant columns (should be dropped)
 3. Cols like ICMP_TYPE, TCP_WIN_MAX_IN/OUT: should be categorical values due to large number of discrete values
+4. Extreme interpolation (although still small amount compare to the overall scheme)
