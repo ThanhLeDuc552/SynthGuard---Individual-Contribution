@@ -30,13 +30,20 @@ curr_dir = Path(__file__).resolve().parent
 if str(curr_dir) not in sys.path:
     sys.path.append(str(curr_dir))
 
-from intra_attack_resampler import resolve_paths
+from intra_attack_resampler import resolve_paths, DERIVED_FEATURES, recompute_derived_features
+
+from sklearn.preprocessing import QuantileTransformer
 
 # Do Minh Thanh's TVAE configuration (`do_minh_thanh/notebooks/tvae_final_perclass_v2.ipynb`)
 TVAE_CODE_COLS = [
     "PROTOCOL", "L7_PROTO", "TCP_FLAGS", "CLIENT_TCP_FLAGS",
-    "SERVER_TCP_FLAGS", "DNS_QUERY_TYPE", "FTP_COMMAND_RET_CODE",
+    "SERVER_TCP_FLAGS", "ICMP_TYPE", "ICMP_IPV4_TYPE",
+    "DNS_QUERY_TYPE", "FTP_COMMAND_RET_CODE",
 ]
+TVAE_SPIKY_CODE_COLS = ["TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT"]
+TVAE_TOP_K_SPIKY = 30
+TVAE_CONST_THRESHOLD = 0.999
+TVAE_ZERO_INFLATED_MIN_RATE = 0.05
 TVAE_DIMS = {
     "128x128": (128, 128),
     "256x256": (256, 256),
@@ -58,14 +65,26 @@ class TVAEPreprocessor:
     Ported from `do_minh_thanh/notebooks/tvae_final_perclass_v2.ipynb`.
     """
 
-    def __init__(self, label_col: str = "Attack", min_code_count: int = 3, log_threshold: float = 1000.0):
+    def __init__(self, label_col: str = "Attack", min_code_count: int = 3, log_threshold: float = 1000.0, random_state: int = 42):
         self.label_col = label_col
         self.min_code_count = min_code_count
         self.log_threshold = log_threshold
+        self.random_state = random_state
         self.feats: List[str] = []
+        self.active_feats: List[str] = []
+        self.const_cols: Dict[str, float] = {}
+        self.orig_code_cols: List[str] = []
+        self.spiky_cols: List[str] = []
+        self.spiky_top: Dict[str, set] = {}
+        self.spiky_rare_vals: Dict[str, np.ndarray] = {}
+        self.zero_inflated_cols: List[str] = []
+        self.zero_flag_cols: List[str] = []
+        self.pos_med: Dict[str, float] = {}
         self.code_cols: List[str] = []
+        self.cont_cols: List[str] = []
         self.int_cols: List[str] = []
         self.log_cols: List[str] = []
+        self.qt: Optional[QuantileTransformer] = None
         self.med: Optional[pd.Series] = None
         self.valid_codes: Dict[str, np.ndarray] = {}
         self.col_min: Optional[pd.Series] = None
@@ -78,9 +97,38 @@ class TVAEPreprocessor:
             self.med = X.median()
         return X.fillna(self.med).fillna(0)
 
+    @staticmethod
+    def _apply_coupled_reparam(X: pd.DataFrame) -> pd.DataFrame:
+        """Reparameterize coupled packet-length and TTL bounds into non-negative deltas."""
+        X = X.copy()
+        if "MIN_TTL" in X.columns and "MAX_TTL" in X.columns:
+            X["MAX_TTL"] = (X["MAX_TTL"] - X["MIN_TTL"]).clip(lower=0.0)
+        if "SHORTEST_FLOW_PKT" in X.columns and "LONGEST_FLOW_PKT" in X.columns:
+            long_orig = X["LONGEST_FLOW_PKT"].copy()
+            X["LONGEST_FLOW_PKT"] = (long_orig - X["SHORTEST_FLOW_PKT"]).clip(lower=0.0)
+            if "MAX_IP_PKT_LEN" in X.columns:
+                X["MAX_IP_PKT_LEN"] = (X["MAX_IP_PKT_LEN"] - long_orig).clip(lower=0.0)
+        return X
+
+    @staticmethod
+    def _invert_coupled_reparam(X: pd.DataFrame) -> pd.DataFrame:
+        """Reconstruct coupled bounds and derived-zero consistency from generated deltas."""
+        X = X.copy()
+        if "MIN_TTL" in X.columns and "MAX_TTL" in X.columns:
+            X["MAX_TTL"] = X["MIN_TTL"] + X["MAX_TTL"].clip(lower=0.0)
+        if "SHORTEST_FLOW_PKT" in X.columns and "LONGEST_FLOW_PKT" in X.columns:
+            X["LONGEST_FLOW_PKT"] = X["SHORTEST_FLOW_PKT"] + X["LONGEST_FLOW_PKT"].clip(lower=0.0)
+            if "MAX_IP_PKT_LEN" in X.columns:
+                X["MAX_IP_PKT_LEN"] = X["LONGEST_FLOW_PKT"] + X["MAX_IP_PKT_LEN"].clip(lower=0.0)
+        if "SRC_TO_DST_AVG_THROUGHPUT" in X.columns and "IN_BYTES" in X.columns:
+            X.loc[X["IN_BYTES"] <= 0, "SRC_TO_DST_AVG_THROUGHPUT"] = 0.0
+        if "DST_TO_SRC_AVG_THROUGHPUT" in X.columns and "OUT_BYTES" in X.columns:
+            X.loc[X["OUT_BYTES"] <= 0, "DST_TO_SRC_AVG_THROUGHPUT"] = 0.0
+        return X
+
     def _snap(self, X: pd.DataFrame) -> pd.DataFrame:
         X = X.copy()
-        for c in self.code_cols:
+        for c in self.orig_code_cols:
             v = self.valid_codes[c]
             x = X[c].values.astype(float)
             if len(v) == 0:
@@ -94,13 +142,24 @@ class TVAEPreprocessor:
 
     def fit(self, df: pd.DataFrame) -> "TVAEPreprocessor":
         self.order = list(df.columns)
-        self.feats = [c for c in df.columns if c not in (self.label_col, "Label", "OOF_Confidence")]
-        self.code_cols = [c for c in TVAE_CODE_COLS if c in self.feats]
+        self.feats = [c for c in df.columns if c not in (self.label_col, "Label", "OOF_Confidence") and c not in DERIVED_FEATURES]
         self.med = None
         X = self._clean(df)
 
+        # 1. Freeze near-constant / constant columns (>99.9% identical)
+        self.const_cols = {}
+        for c in self.feats:
+            if X[c].nunique(dropna=True) <= 1 or X[c].value_counts(normalize=True, dropna=True).iloc[0] > TVAE_CONST_THRESHOLD:
+                mode_val = X[c].mode(dropna=True)
+                self.const_cols[c] = float(mode_val.iloc[0]) if len(mode_val) > 0 else 0.0
+        self.active_feats = [c for c in self.feats if c not in self.const_cols]
+
+        # 2. Discrete code columns (including ICMP_TYPE/ICMP_IPV4_TYPE) & spiky OS window codes
+        self.orig_code_cols = [c for c in TVAE_CODE_COLS if c in self.active_feats]
+        self.spiky_cols = [c for c in TVAE_SPIKY_CODE_COLS if c in self.active_feats]
+
         self.valid_codes = {}
-        for c in self.code_cols:
+        for c in self.orig_code_cols:
             vc = X[c].value_counts()
             valid = np.sort(vc[vc >= self.min_code_count].index.values.astype(float))
             if len(valid) == 0:
@@ -108,32 +167,115 @@ class TVAEPreprocessor:
             self.valid_codes[c] = valid
 
         X = self._snap(X)
+        self.spiky_top = {}
+        self.spiky_rare_vals = {}
+        for c in self.spiky_cols:
+            top_vals = set(X[c].value_counts().index[:TVAE_TOP_K_SPIKY].astype(float))
+            self.spiky_top[c] = top_vals
+            self.spiky_rare_vals[c] = X.loc[~X[c].astype(float).isin(top_vals), c].dropna().to_numpy(dtype=float)
+
+        # 3. Coupled delta reparameterization before bounds & continuous transform fitting
+        X_rep = self._apply_coupled_reparam(X)
         self.int_cols = [c for c in self.feats if np.all(np.mod(X[c], 1) == 0)]
+        self.col_min = X_rep[self.feats].min()
+        self.col_max = X_rep[self.feats].max()
+
+        self.cont_cols = [c for c in self.active_feats if c not in self.orig_code_cols and c not in self.spiky_cols]
+
+        # 4. Zero-inflated continuous columns -> hurdle binary flag + positive-only QuantileTransformer
+        self.zero_inflated_cols = []
+        self.zero_flag_cols = []
+        self.pos_med = {}
+        X_cont = X_rep[self.cont_cols].copy()
+        for c in self.cont_cols:
+            if X_cont[c].min() >= 0:
+                zero_rate = float((X_cont[c] == 0).mean())
+                if TVAE_ZERO_INFLATED_MIN_RATE <= zero_rate <= TVAE_CONST_THRESHOLD:
+                    self.zero_inflated_cols.append(c)
+                    self.zero_flag_cols.append(f"{c}__is_zero")
+                    pos_vals = X_cont.loc[X_cont[c] > 0, c]
+                    med_pos = float(pos_vals.median()) if len(pos_vals) > 0 else 0.0
+                    self.pos_med[c] = med_pos
+                    X_cont.loc[X_cont[c] == 0, c] = med_pos
+
+        self.code_cols = self.orig_code_cols + self.spiky_cols + self.zero_flag_cols
         self.log_cols = [
-            c for c in self.feats
-            if c not in self.code_cols and X[c].min() >= 0 and X[c].max() > self.log_threshold
+            c for c in self.cont_cols
+            if X_rep[c].min() >= 0 and X_rep[c].max() > self.log_threshold
         ]
-        self.col_min = X.min()
-        self.col_max = X.max()
+
+        if len(self.cont_cols) > 0 and len(X_cont) >= 2:
+            n_q = min(1000, len(X_cont))
+            self.qt = QuantileTransformer(
+                n_quantiles=n_q,
+                output_distribution="normal",
+                subsample=min(100_000, len(X_cont)),
+                random_state=self.random_state,
+            )
+            self.qt.fit(X_cont)
+        else:
+            self.qt = None
         return self
 
     def to_model(self, df: pd.DataFrame) -> pd.DataFrame:
-        Z = self._snap(self._clean(df))
-        for c in self.log_cols:
-            Z[c] = np.log1p(Z[c].clip(lower=0))
-        for c in self.code_cols:
+        X = self._snap(self._clean(df))
+        X_rep = self._apply_coupled_reparam(X)
+        Z = X_rep[self.active_feats].copy()
+
+        for c in self.zero_inflated_cols:
+            is_zero = (Z[c] == 0)
+            Z[f"{c}__is_zero"] = np.where(is_zero, "1", "0")
+            Z.loc[is_zero, c] = self.pos_med[c]
+
+        if self.qt is not None and len(self.cont_cols) > 0:
+            Z[self.cont_cols] = self.qt.transform(Z[self.cont_cols])
+        else:
+            for c in self.log_cols:
+                if c in Z.columns:
+                    Z[c] = np.log1p(Z[c].clip(lower=0))
+
+        for c in self.orig_code_cols:
             Z[c] = Z[c].map(lambda v: f"{v:g}")
+        for c in self.spiky_cols:
+            top_vals = self.spiky_top[c]
+            Z[c] = Z[c].map(lambda v: f"{float(v):g}" if float(v) in top_vals else "__OTHER__")
         return Z
 
     def from_model(self, Z: pd.DataFrame) -> pd.DataFrame:
         X = Z.copy()
-        for c in self.code_cols:
+        rng = np.random.default_rng(self.random_state)
+
+        for c in self.orig_code_cols:
             X[c] = pd.to_numeric(X[c], errors="coerce").fillna(self.med[c] if self.med is not None else 0.0)
-        for c in self.log_cols:
-            X[c] = np.expm1(X[c])
+        for c in self.spiky_cols:
+            m_other = X[c].astype(str) == "__OTHER__"
+            if m_other.any() and len(self.spiky_rare_vals.get(c, [])) > 0:
+                X.loc[m_other, c] = rng.choice(self.spiky_rare_vals[c], size=int(m_other.sum()))
+            X[c] = pd.to_numeric(X[c], errors="coerce").fillna(self.med[c] if self.med is not None else 0.0)
+
+        if self.qt is not None and len(self.cont_cols) > 0:
+            X[self.cont_cols] = self.qt.inverse_transform(X[self.cont_cols])
+        else:
+            for c in self.log_cols:
+                if c in X.columns:
+                    X[c] = np.expm1(X[c])
+
+        for c in self.zero_inflated_cols:
+            flag_col = f"{c}__is_zero"
+            if flag_col in X.columns:
+                X.loc[X[flag_col].astype(str) == "1", c] = 0.0
+                X = X.drop(columns=[flag_col])
+
+        for c, v in self.const_cols.items():
+            X[c] = v
+
         X = X[self.feats].clip(lower=self.col_min, upper=self.col_max, axis=1)
+        X = self._invert_coupled_reparam(X)
         X[self.int_cols] = X[self.int_cols].round()
-        return X
+        X = recompute_derived_features(X)
+        target_cols = [c for c in self.order if c in X.columns]
+        extra_cols = [c for c in X.columns if c not in target_cols]
+        return X[target_cols + extra_cols]
 
 
 class TVAEGenerator:
@@ -232,7 +374,7 @@ class TVAEGenerator:
         print(f"    Params: epochs={resolved_epochs}, bs={resolved_batch_size}, emb={resolved_emb}, dims={dims_tuple}, l2={l2scale:.2e}, lf={loss_factor}")
         print(f"    Compute Device: {self.device.upper()}")
 
-        self.tvae_preprocessor = TVAEPreprocessor(label_col="Attack")
+        self.tvae_preprocessor = TVAEPreprocessor(label_col="Attack", random_state=self.random_state)
         self.tvae_preprocessor.fit(train_attacks)
 
         self.unified_model = None

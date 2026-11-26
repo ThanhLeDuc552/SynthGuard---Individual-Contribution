@@ -52,10 +52,16 @@ class SyntheticSampleFilter:
         random_state: int = 42,
         default_oof_threshold: float = 0.6,
         enn_neighbors: int = 3,
+        manifold_k: int = 5,
+        manifold_alpha: float = 1.0,
+        enable_manifold_gate: bool = True,
     ):
         self.random_state = random_state
         self.default_oof_threshold = default_oof_threshold
         self.enn_neighbors = enn_neighbors
+        self.manifold_k = manifold_k
+        self.manifold_alpha = manifold_alpha
+        self.enable_manifold_gate = enable_manifold_gate
 
         self.oof_models: List[xgb.XGBClassifier] = []
         self.label_encoder: Optional[LabelEncoder] = None
@@ -64,7 +70,16 @@ class SyntheticSampleFilter:
         self.enn_engine: Optional[NearestNeighbors] = None
         self.enn_scaler: Optional[StandardScaler] = None
         self.real_labels_enn: Optional[np.ndarray] = None
+        self.manifold_scaler: Optional[StandardScaler] = None
+        self.manifold_nn_by_class: Dict[str, NearestNeighbors] = {}
+        self.manifold_radii_by_class: Dict[str, np.ndarray] = {}
         self.valid_protocols: Optional[set] = None
+
+    @staticmethod
+    def _signed_log(X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+        """Signed log1p compression for heavy-tailed NetFlow distances."""
+        arr = np.asarray(X, dtype=np.float64)
+        return np.sign(arr) * np.log1p(np.abs(arr))
 
     @staticmethod
     def _sanitize_features(
@@ -146,12 +161,17 @@ class SyntheticSampleFilter:
             zero_in = (df_out["IN_PKTS"] == 0) & (df_out["IN_BYTES"] > 0)
             df_out.loc[zero_in, "IN_BYTES"] = 0
 
-        # Rule B: Non-TCP protocol flows cannot have non-zero TCP flags
+        # Rule B: Non-TCP protocol flows cannot have non-zero TCP flags; TCP/UDP cannot have ICMP types
         if "PROTOCOL" in df_out.columns:
             non_tcp = df_out["PROTOCOL"] != 6
             for flag_col in ["TCP_FLAGS", "CLIENT_TCP_FLAGS", "SERVER_TCP_FLAGS"]:
                 if flag_col in df_out.columns:
                     df_out.loc[non_tcp, flag_col] = 0
+
+            tcp_udp = df_out["PROTOCOL"].isin([6, 17])
+            for icmp_col in ["ICMP_TYPE", "ICMP_IPV4_TYPE"]:
+                if icmp_col in df_out.columns:
+                    df_out.loc[tcp_udp, icmp_col] = 0
 
             # Rule C: Protocol valid numbers constraint
             if self.valid_protocols:
@@ -160,7 +180,15 @@ class SyntheticSampleFilter:
                     mode_proto = 6
                     df_out.loc[invalid_proto, "PROTOCOL"] = mode_proto
 
-        # Rule D: Packet length and TTL sanity invariants
+        # Rule D: Packet length, byte-to-packet, and TTL sanity invariants
+        if "IN_PKTS" in df_out.columns and "IN_BYTES" in df_out.columns:
+            inv_in = (df_out["IN_PKTS"] > 0) & (df_out["IN_BYTES"] < df_out["IN_PKTS"])
+            df_out.loc[inv_in, "IN_BYTES"] = df_out.loc[inv_in, "IN_PKTS"]
+
+        if "OUT_PKTS" in df_out.columns and "OUT_BYTES" in df_out.columns:
+            inv_out = (df_out["OUT_PKTS"] > 0) & (df_out["OUT_BYTES"] < df_out["OUT_PKTS"])
+            df_out.loc[inv_out, "OUT_BYTES"] = df_out.loc[inv_out, "OUT_PKTS"]
+
         if "MIN_IP_PKT_LEN" in df_out.columns and "MAX_IP_PKT_LEN" in df_out.columns:
             inv_ip = df_out["MIN_IP_PKT_LEN"] > df_out["MAX_IP_PKT_LEN"]
             df_out.loc[inv_ip, "MAX_IP_PKT_LEN"] = df_out.loc[inv_ip, "MIN_IP_PKT_LEN"]
@@ -169,11 +197,59 @@ class SyntheticSampleFilter:
             inv_pkt = df_out["SHORTEST_FLOW_PKT"] > df_out["LONGEST_FLOW_PKT"]
             df_out.loc[inv_pkt, "LONGEST_FLOW_PKT"] = df_out.loc[inv_pkt, "SHORTEST_FLOW_PKT"]
 
+        if "LONGEST_FLOW_PKT" in df_out.columns and "MAX_IP_PKT_LEN" in df_out.columns:
+            inv_long_ip = df_out["LONGEST_FLOW_PKT"] > df_out["MAX_IP_PKT_LEN"]
+            df_out.loc[inv_long_ip, "MAX_IP_PKT_LEN"] = df_out.loc[inv_long_ip, "LONGEST_FLOW_PKT"]
+
         if "MIN_TTL" in df_out.columns and "MAX_TTL" in df_out.columns:
             inv_ttl = df_out["MIN_TTL"] > df_out["MAX_TTL"]
             df_out.loc[inv_ttl, "MAX_TTL"] = df_out.loc[inv_ttl, "MIN_TTL"]
 
         return df_out
+
+    def validate_netflow_invariants(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Strictly checks NetFlow physical & protocol invariants without clamping.
+        Returns a boolean mask (True = valid flow, False = invariant violation).
+        """
+        valid = np.ones(len(df), dtype=bool)
+        if df.empty:
+            return valid
+
+        if "MIN_TTL" in df.columns and "MAX_TTL" in df.columns:
+            valid &= (df["MIN_TTL"] <= df["MAX_TTL"]).values
+        if "SHORTEST_FLOW_PKT" in df.columns and "LONGEST_FLOW_PKT" in df.columns:
+            valid &= (df["SHORTEST_FLOW_PKT"] <= df["LONGEST_FLOW_PKT"]).values
+        if "LONGEST_FLOW_PKT" in df.columns and "MAX_IP_PKT_LEN" in df.columns:
+            valid &= (df["LONGEST_FLOW_PKT"] <= df["MAX_IP_PKT_LEN"]).values
+        if "MIN_IP_PKT_LEN" in df.columns and "MAX_IP_PKT_LEN" in df.columns:
+            valid &= (df["MIN_IP_PKT_LEN"] <= df["MAX_IP_PKT_LEN"]).values
+        if "IN_PKTS" in df.columns and "IN_BYTES" in df.columns:
+            valid &= ((df["IN_PKTS"] == 0) | (df["IN_BYTES"] >= df["IN_PKTS"])).values
+            valid &= ((df["IN_PKTS"] > 0) | (df["IN_BYTES"] == 0)).values
+        if "OUT_PKTS" in df.columns and "OUT_BYTES" in df.columns:
+            valid &= ((df["OUT_PKTS"] == 0) | (df["OUT_BYTES"] >= df["OUT_PKTS"])).values
+            valid &= ((df["OUT_PKTS"] > 0) | (df["OUT_BYTES"] == 0)).values
+
+        if "PROTOCOL" in df.columns:
+            non_tcp = df["PROTOCOL"] != 6
+            for flag_col in ["TCP_FLAGS", "CLIENT_TCP_FLAGS", "SERVER_TCP_FLAGS"]:
+                if flag_col in df.columns:
+                    valid &= ((~non_tcp) | (df[flag_col] == 0)).values
+
+            tcp_udp = df["PROTOCOL"].isin([6, 17])
+            for icmp_col in ["ICMP_TYPE", "ICMP_IPV4_TYPE"]:
+                if icmp_col in df.columns:
+                    valid &= ((~tcp_udp) | (df[icmp_col] == 0)).values
+
+            if self.valid_protocols:
+                valid &= df["PROTOCOL"].isin(self.valid_protocols).values
+
+        num_cols = df.select_dtypes(include=[np.number]).columns
+        if len(num_cols) > 0:
+            valid &= (df[num_cols] >= 0).all(axis=1).values
+
+        return valid
 
     # ------------------------------------------------------------------------
     # 2. OOF Confidence Gate: 5-Fold XGBoost Predictor on Real Dataset
@@ -249,23 +325,86 @@ class SyntheticSampleFilter:
     # ------------------------------------------------------------------------
     def fit_enn(self, real_train_df: pd.DataFrame):
         """
-        Fits NearestNeighbors index (n_neighbors=3) on real training flows.
+        Fits NearestNeighbors index (n_neighbors=3) and per-class local manifold-support
+        indices in signed_log1p + StandardScaler space on real training flows.
         """
-        print(f">>> [SampleFilter ENN] Fitting Edited Nearest Neighbors (k={self.enn_neighbors}) on Real Dataset...")
+        print(f">>> [SampleFilter ENN & Manifold] Fitting ENN (k={self.enn_neighbors}) & k-NN Support (k={self.manifold_k}) in signed_log1p space...")
         feature_cols = [c for c in real_train_df.columns if c not in ["Label", "Attack"]]
-        X_real, _ = self._sanitize_features(real_train_df, feature_cols, fill_values=self.real_fill_values)
+        if not self.real_feature_cols:
+            self.real_feature_cols = feature_cols
+        X_real, fill_vals = self._sanitize_features(real_train_df, feature_cols, fill_values=self.real_fill_values)
+        if self.real_fill_values is None:
+            self.real_fill_values = fill_vals
 
         self.enn_scaler = StandardScaler()
-        X_scaled = self.enn_scaler.fit_transform(X_real)
+        X_scaled = self.enn_scaler.fit_transform(self._signed_log(X_real))
 
         self.enn_engine = NearestNeighbors(n_neighbors=self.enn_neighbors, algorithm="auto", n_jobs=-1)
         self.enn_engine.fit(X_scaled)
         self.real_labels_enn = real_train_df["Attack"].values
-        print(f"    ENN index ready on {len(X_scaled):,} real reference flows.\n")
+
+        self.fit_manifold_gate(real_train_df, X_scaled=X_scaled)
+        print(f"    ENN & Manifold indices ready on {len(X_scaled):,} real flows ({len(self.manifold_nn_by_class)} classes).\n")
+
+    def fit_manifold_gate(self, real_train_df: pd.DataFrame, X_scaled: Optional[np.ndarray] = None):
+        """
+        Fits per-class 1-NN lookup and local k-NN hypersphere radii r_k in signed_log1p + StandardScaler space.
+        """
+        feature_cols = self.real_feature_cols or [c for c in real_train_df.columns if c not in ["Label", "Attack"]]
+        if not self.real_feature_cols:
+            self.real_feature_cols = feature_cols
+
+        if X_scaled is None or self.enn_scaler is None:
+            X_real, fill_vals = self._sanitize_features(real_train_df, feature_cols, fill_values=self.real_fill_values)
+            if self.real_fill_values is None:
+                self.real_fill_values = fill_vals
+            self.manifold_scaler = StandardScaler()
+            X_scaled = self.manifold_scaler.fit_transform(self._signed_log(X_real))
+        else:
+            self.manifold_scaler = self.enn_scaler
+
+        labels = real_train_df["Attack"].values
+        self.manifold_nn_by_class = {}
+        self.manifold_radii_by_class = {}
+
+        for cls_name in np.unique(labels):
+            E_cls = X_scaled[labels == cls_name]
+            if len(E_cls) < 2:
+                continue
+            k_eff = min(self.manifold_k, len(E_cls) - 1)
+            nn_k = NearestNeighbors(n_neighbors=k_eff + 1, algorithm="auto", n_jobs=-1).fit(E_cls)
+            radii_cls = nn_k.kneighbors(E_cls)[0][:, k_eff]
+            nn_1 = NearestNeighbors(n_neighbors=1, algorithm="auto", n_jobs=-1).fit(E_cls)
+            self.manifold_nn_by_class[cls_name] = nn_1
+            self.manifold_radii_by_class[cls_name] = radii_cls
+
+    def manifold_support_filter(self, synthetic_df: pd.DataFrame) -> np.ndarray:
+        """
+        Local density-adaptive k-NN manifold-support gate in signed_log1p + StandardScaler space:
+        keeps x_syn only if dist(x_syn, nn_real_same_class) <= manifold_alpha * r_k(nn_real_same_class).
+        """
+        if self.manifold_scaler is None or not self.manifold_nn_by_class:
+            raise RuntimeError("Manifold gate not fitted. Call fit_manifold_gate or fit_enn first.")
+
+        X_syn, _ = self._sanitize_features(synthetic_df, self.real_feature_cols, fill_values=self.real_fill_values)
+        E_syn = self.manifold_scaler.transform(self._signed_log(X_syn))
+
+        keep_mask = np.ones(len(synthetic_df), dtype=bool)
+        syn_classes = synthetic_df["Attack"].values
+
+        for cls_name in np.unique(syn_classes):
+            if cls_name not in self.manifold_nn_by_class:
+                continue
+            idx_arr = np.where(syn_classes == cls_name)[0]
+            dists, nn_idx = self.manifold_nn_by_class[cls_name].kneighbors(E_syn[idx_arr])
+            local_radii = self.manifold_radii_by_class[cls_name][nn_idx[:, 0]]
+            keep_mask[idx_arr] = (dists[:, 0] <= self.manifold_alpha * local_radii)
+
+        return keep_mask
 
     def enn_filter(self, synthetic_df: pd.DataFrame) -> np.ndarray:
         """
-        Checks whether synthetic sample is close to the wrong class.
+        Checks whether synthetic sample is close to the wrong class in signed_log1p + StandardScaler space.
         Returns boolean mask where True = keep (neighbor majority agrees), False = remove.
         """
         if self.enn_engine is None or self.enn_scaler is None:
@@ -273,7 +412,7 @@ class SyntheticSampleFilter:
 
         X_syn, _ = self._sanitize_features(synthetic_df, self.real_feature_cols, fill_values=self.real_fill_values)
 
-        X_syn_scaled = self.enn_scaler.transform(X_syn)
+        X_syn_scaled = self.enn_scaler.transform(self._signed_log(X_syn))
         _, indices = self.enn_engine.kneighbors(X_syn_scaled)
 
         keep_mask = np.ones(len(synthetic_df), dtype=bool)
@@ -300,6 +439,8 @@ class SyntheticSampleFilter:
         syn_deficit: Optional[Dict[str, int]] = None,
         oof_threshold: Optional[float] = None,
         run_enn: bool = True,
+        run_manifold_gate: Optional[bool] = None,
+        reject_invalid_invariants: bool = True,
         deduplicate: bool = True,
         scaler: Optional[Any] = None,
         was_log_transformed: bool = False,
@@ -310,10 +451,12 @@ class SyntheticSampleFilter:
           2. Deduplicate intra-synthetic rows (and exact copies of real_train_df).
           3. OOF confidence gating.
           4. ENN neighborhood agreement gating.
-          5. Cap each class at target deficit n_syn (selecting top confidence samples).
+          5. Local density-adaptive k-NN manifold-support gating (signed_log1p space).
+          6. Cap each class at target deficit n_syn (selecting top confidence samples).
         """
         t0 = time.time()
         thresh = oof_threshold if oof_threshold is not None else self.default_oof_threshold
+        use_manifold = self.enable_manifold_gate if run_manifold_gate is None else run_manifold_gate
 
         print("=" * 80)
         print(">>> [SampleFilter] Executing Synthetic Sample Filtering Pipeline")
@@ -321,12 +464,15 @@ class SyntheticSampleFilter:
         print(f"Input Candidate Pool:  {len(synthetic_df):,} flows")
         print(f"OOF Confidence Thresh: {thresh}")
         print(f"ENN Boundary Check:    {'Enabled (k=3)' if run_enn else 'Disabled'}")
+        print(f"Manifold Support Gate: {'Enabled (k=' + str(self.manifold_k) + ', alpha=' + str(self.manifold_alpha) + ')' if use_manifold else 'Disabled'}")
 
-        # Ensure OOF predictor and ENN are fitted if real_train_df provided
+        # Ensure OOF predictor, ENN, and manifold gate are fitted if real_train_df provided
         if not self.oof_models and real_train_df is not None:
             self.fit_oof_predictor(real_train_df)
         if run_enn and self.enn_engine is None and real_train_df is not None:
             self.fit_enn(real_train_df)
+        elif use_manifold and not self.manifold_nn_by_class and real_train_df is not None:
+            self.fit_manifold_gate(real_train_df)
 
         if synthetic_df.empty:
             print("    Filtering Note: Input synthetic pool is empty (e.g. y_max=1 with zero deficit).")
@@ -340,6 +486,7 @@ class SyntheticSampleFilter:
                     "duplicates_removed": 0,
                     "oof_pass_count": 0,
                     "enn_pass_count": 0,
+                    "manifold_pass_count": 0,
                     "both_pass_count": 0,
                     "final_kept_count": 0,
                     "threshold_used": thresh,
@@ -347,10 +494,51 @@ class SyntheticSampleFilter:
                 },
             }
 
-        # 1. Reverse transform & physical rules
-        df_rules = self.apply_reverse_transform_and_rules(
-            synthetic_df, scaler=scaler, was_log_transformed=was_log_transformed
-        )
+        # 1. Reverse transform & strict NetFlow protocol invariant validation
+        if reject_invalid_invariants:
+            df_pre_rules = self.apply_reverse_transform_and_rules(
+                synthetic_df, scaler=scaler, was_log_transformed=was_log_transformed
+            ) if (scaler is not None or was_log_transformed) else synthetic_df.copy()
+            # Round integer/categorical columns before strict invariant check without clamping violations
+            feat_cols_check = [c for c in df_pre_rules.columns if c not in ["Label", "Attack"]]
+            cat_cols_check = [c for c in CATEGORICAL_FEATURES if c in feat_cols_check]
+            int_round_cols = [
+                "IN_PKTS", "OUT_PKTS", "IN_BYTES", "OUT_BYTES",
+                "MIN_TTL", "MAX_TTL", "TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT",
+                "LONGEST_FLOW_PKT", "SHORTEST_FLOW_PKT", "MIN_IP_PKT_LEN", "MAX_IP_PKT_LEN",
+            ]
+            for col in int_round_cols + cat_cols_check:
+                if col in df_pre_rules.columns and col != "L7_PROTO":
+                    df_pre_rules[col] = pd.to_numeric(df_pre_rules[col], errors="coerce").fillna(0).round().astype(int)
+            inv_mask = self.validate_netflow_invariants(df_pre_rules)
+            invariants_rejected = int((~inv_mask).sum())
+            df_rules = df_pre_rules[inv_mask].reset_index(drop=True)
+        else:
+            invariants_rejected = 0
+            df_rules = self.apply_reverse_transform_and_rules(
+                synthetic_df, scaler=scaler, was_log_transformed=was_log_transformed
+            )
+
+        if df_rules.empty:
+            elapsed = time.time() - t0
+            print(f"    Filtering Note: All {len(synthetic_df):,} candidates failed NetFlow protocol invariants.")
+            print("=" * 80 + "\n")
+            return {
+                "kept_df": pd.DataFrame(),
+                "rejected_df": synthetic_df.copy(),
+                "diagnostics": {
+                    "input_count": len(synthetic_df),
+                    "invariants_rejected": invariants_rejected,
+                    "duplicates_removed": 0,
+                    "oof_pass_count": 0,
+                    "enn_pass_count": 0,
+                    "manifold_pass_count": 0,
+                    "both_pass_count": 0,
+                    "final_kept_count": 0,
+                    "threshold_used": thresh,
+                    "elapsed_sec": round(elapsed, 2),
+                },
+            }
 
         # 2. Deduplicate intra-synthetic flows and exact copies of real training flows
         duplicates_removed = 0
@@ -388,6 +576,7 @@ class SyntheticSampleFilter:
                     "duplicates_removed": duplicates_removed,
                     "oof_pass_count": 0,
                     "enn_pass_count": 0,
+                    "manifold_pass_count": 0,
                     "both_pass_count": 0,
                     "final_kept_count": 0,
                     "threshold_used": thresh,
@@ -395,11 +584,13 @@ class SyntheticSampleFilter:
                 },
             }
 
-        # 2. Ensure OOF predictor and ENN are fitted if real_train_df provided
+        # 2b. Ensure OOF predictor, ENN, and manifold gate are fitted if real_train_df provided
         if not self.oof_models and real_train_df is not None:
             self.fit_oof_predictor(real_train_df)
         if run_enn and self.enn_engine is None and real_train_df is not None:
             self.fit_enn(real_train_df)
+        elif use_manifold and not self.manifold_nn_by_class and real_train_df is not None:
+            self.fit_manifold_gate(real_train_df)
 
         # 3. OOF confidence evaluation
         confidences = self.predict_oof_confidence(df_rules)
@@ -412,7 +603,13 @@ class SyntheticSampleFilter:
         else:
             enn_mask = np.ones(len(df_rules), dtype=bool)
 
-        combined_keep_mask = oof_mask & enn_mask
+        # 5. Local k-NN manifold-support evaluation (signed_log1p space)
+        if use_manifold and self.manifold_nn_by_class:
+            manifold_mask = self.manifold_support_filter(df_rules)
+        else:
+            manifold_mask = np.ones(len(df_rules), dtype=bool)
+
+        combined_keep_mask = oof_mask & enn_mask & manifold_mask
 
         df_kept_raw = df_rules[combined_keep_mask].copy()
         df_rejected = df_rules[~combined_keep_mask].copy()
@@ -442,10 +639,12 @@ class SyntheticSampleFilter:
         elapsed = time.time() - t0
         print(f"\n    Filtering Results:")
         print(f"      - Input Candidate Pool:     {len(synthetic_df):,}")
+        print(f"      - Invariants Rejected:      {invariants_rejected:,} ({invariants_rejected / len(synthetic_df) * 100:.2f}%)")
         print(f"      - Duplicates Removed:       {duplicates_removed:,} ({duplicates_removed / len(synthetic_df) * 100:.2f}%)")
         print(f"      - Passed OOF Gate:          {oof_mask.sum():,} ({oof_mask.sum() / len(synthetic_df) * 100:.2f}%)")
         print(f"      - Passed ENN Check:         {enn_mask.sum():,} ({enn_mask.sum() / len(synthetic_df) * 100:.2f}%)")
-        print(f"      - Passed Both Gates:        {combined_keep_mask.sum():,} ({combined_keep_mask.sum() / len(synthetic_df) * 100:.2f}%)")
+        print(f"      - Passed Manifold Gate:     {manifold_mask.sum():,} ({manifold_mask.sum() / len(synthetic_df) * 100:.2f}%)")
+        print(f"      - Passed All Gates:         {combined_keep_mask.sum():,} ({combined_keep_mask.sum() / len(synthetic_df) * 100:.2f}%)")
         print(f"      - Final Budgeted Synthetic: {len(df_final_kept):,} flows ({elapsed:.2f}s)")
         print("=" * 80 + "\n")
 
@@ -454,9 +653,11 @@ class SyntheticSampleFilter:
             "rejected_df": df_rejected,
             "diagnostics": {
                 "input_count": len(synthetic_df),
+                "invariants_rejected": invariants_rejected,
                 "duplicates_removed": duplicates_removed,
                 "oof_pass_count": int(oof_mask.sum()),
                 "enn_pass_count": int(enn_mask.sum()),
+                "manifold_pass_count": int(manifold_mask.sum()),
                 "both_pass_count": int(combined_keep_mask.sum()),
                 "final_kept_count": len(df_final_kept),
                 "threshold_used": thresh,

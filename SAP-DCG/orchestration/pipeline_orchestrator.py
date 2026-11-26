@@ -244,7 +244,7 @@ class SequentialTuningPipeline:
         else:
             train_benign, real_train_attacks = split_benign_attack(train_df, verbose=False)
 
-        # Pass the SMOTE-NC pre-balanced attack dataset from Round 1 to CTGAN
+        # Pass the SMOTE-NC pre-balanced attack dataset from Round 1 to the generator
         if self.best_train_resampled is not None and not self.best_train_resampled.empty:
             print(f">>> [Generators Train] Training {self.generator_type.upper()} on SMOTE-NC pre-balanced attack dataset from Round 1 ({len(self.best_train_resampled):,} total flows)...")
             generator_train_attacks = self.best_train_resampled[self.best_train_resampled["Label"] == 1].copy().reset_index(drop=True)

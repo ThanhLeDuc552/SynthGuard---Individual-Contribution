@@ -61,6 +61,50 @@ CATEGORICAL_FEATURES = [
     "FTP_COMMAND_RET_CODE",
 ]
 
+# Derived NetFlow features excluded from SMOTE-NC & deep generators and recomputed deterministically
+DERIVED_FEATURES = [
+    "TCP_FLAGS",
+    "SRC_TO_DST_SECOND_BYTES",
+    "DST_TO_SRC_SECOND_BYTES",
+    "SRC_TO_DST_AVG_THROUGHPUT",
+    "DST_TO_SRC_AVG_THROUGHPUT",
+]
+
+
+def recompute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Recomputes deterministic NetFlow derived features from independent base features."""
+    out = df.copy()
+    if "CLIENT_TCP_FLAGS" in out.columns and "SERVER_TCP_FLAGS" in out.columns:
+        c_flags = pd.to_numeric(out["CLIENT_TCP_FLAGS"], errors="coerce").fillna(0).round().astype(int)
+        s_flags = pd.to_numeric(out["SERVER_TCP_FLAGS"], errors="coerce").fillna(0).round().astype(int)
+        tcp_flags = np.bitwise_or(c_flags, s_flags)
+        if "PROTOCOL" in out.columns:
+            proto = pd.to_numeric(out["PROTOCOL"], errors="coerce").fillna(0).round().astype(int)
+            tcp_flags = np.where(proto == 6, tcp_flags, 0)
+        out["TCP_FLAGS"] = tcp_flags
+
+    flow_dur_ms = (
+        pd.to_numeric(out["FLOW_DURATION_MILLISECONDS"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        if "FLOW_DURATION_MILLISECONDS" in out.columns
+        else pd.Series(0.0, index=out.index)
+    )
+
+    if "IN_BYTES" in out.columns and "DURATION_IN" in out.columns:
+        in_b = pd.to_numeric(out["IN_BYTES"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        dur_in_ms = pd.to_numeric(out["DURATION_IN"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        eff_dur_in_s = np.where(dur_in_ms > 0, dur_in_ms / 1000.0, np.where(flow_dur_ms > 0, flow_dur_ms / 1000.0, 1.0))
+        out["SRC_TO_DST_SECOND_BYTES"] = np.where(in_b > 0, in_b / eff_dur_in_s, 0.0)
+        out["SRC_TO_DST_AVG_THROUGHPUT"] = np.where(in_b > 0, (in_b * 8.0) / eff_dur_in_s, 0.0)
+
+    if "OUT_BYTES" in out.columns and "DURATION_OUT" in out.columns:
+        out_b = pd.to_numeric(out["OUT_BYTES"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        dur_out_ms = pd.to_numeric(out["DURATION_OUT"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        eff_dur_out_s = np.where(dur_out_ms > 0, dur_out_ms / 1000.0, np.where(flow_dur_ms > 0, flow_dur_ms / 1000.0, 1.0))
+        out["DST_TO_SRC_SECOND_BYTES"] = np.where(out_b > 0, out_b / eff_dur_out_s, 0.0)
+        out["DST_TO_SRC_AVG_THROUGHPUT"] = np.where(out_b > 0, (out_b * 8.0) / eff_dur_out_s, 0.0)
+
+    return out
+
 
 # ============================================================================
 # Directory Resolution Helper
@@ -266,7 +310,8 @@ class IntraAttackResampler:
         print(">>> [Step 6/6] Normalizing Samples & Resampling Attack Flows via SMOTE-NC...")
         t0 = time.time()
 
-        feature_cols = [c for c in train_attacks.columns if c not in ["Label", "Attack"]]
+        orig_order = list(train_attacks.columns)
+        feature_cols = [c for c in train_attacks.columns if c not in ["Label", "Attack"] + DERIVED_FEATURES]
         cat_cols = [c for c in CATEGORICAL_FEATURES if c in feature_cols]
         cont_cols = [c for c in feature_cols if c not in cat_cols]
         cat_indices = [feature_cols.index(c) for c in cat_cols]
@@ -336,6 +381,8 @@ class IntraAttackResampler:
 
         df_attacks_smotenc_orig["Attack"] = y_res.values
         df_attacks_smotenc_orig["Label"] = 1
+        df_attacks_smotenc_orig = recompute_derived_features(df_attacks_smotenc_orig)
+        df_attacks_smotenc_orig = df_attacks_smotenc_orig[[c for c in orig_order if c in df_attacks_smotenc_orig.columns]]
 
         print(f"    SMOTE-NC Complete: {len(train_attacks):,} -> {len(df_attacks_smotenc_orig):,} attack flows")
         print(f"    Generated Synthetic Flows: {len(df_attacks_smotenc_orig) - len(train_attacks):,}")
